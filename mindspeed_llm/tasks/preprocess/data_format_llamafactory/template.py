@@ -40,7 +40,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional, Union
 
 from .data_utils import Role
-from .formatter import EmptyFormatter, FunctionFormatter, StringFormatter, ToolFormatter
+from .formatter import EmptyFormatter, FunctionFormatter, ObservationFormatter, StringFormatter, ToolFormatter
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
@@ -476,7 +476,7 @@ def register_custom_template(name, json_file_path=TEMPLATES_DIR, enable_thinking
     format_user = StringFormatter(**format_user) if format_user else None
     format_assistant = StringFormatter(**format_assistant) if format_assistant else None
     format_system = StringFormatter(**format_system) if format_system else None
-    format_observation = StringFormatter(**format_observation) if format_observation else None
+    format_observation = ObservationFormatter(**format_observation) if format_observation else None
     format_separator = EmptyFormatter(**format_separator) if format_separator else None
     format_prefix = EmptyFormatter(**format_prefix) if format_prefix else None
     template_class = _get_template_class(template_class) if template_class else Template
