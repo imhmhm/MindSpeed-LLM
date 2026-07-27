@@ -30,7 +30,7 @@ from megatron.legacy.data.dataset_utils import get_train_valid_test_split_
 from mindspeed_llm.training.tokenizer import build_tokenizer
 from mindspeed_llm.tasks.utils.error_utils import check_equal
 from mindspeed_llm.tasks.preprocess.mtf_dataset import MTFDataset, get_packed_indexed_dataset
-from mindspeed_llm.tasks.preprocess.templates import get_model_template
+from mindspeed_llm.tasks.preprocess.data_format_llamafactory import get_model_template
 from mindspeed_llm.training.utils import compute_actual_seq_len
 
 logger = logging.getLogger(__name__)
