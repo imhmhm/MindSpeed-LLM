@@ -31,6 +31,7 @@ from mindspeed_llm.training.tokenizer import build_tokenizer
 from mindspeed_llm.tasks.utils.error_utils import check_equal
 from mindspeed_llm.tasks.preprocess.mtf_dataset import MTFDataset, get_packed_indexed_dataset
 from mindspeed_llm.tasks.preprocess.data_format_llamafactory import get_model_template
+from mindspeed_llm.core.datasets.blended_megatron_dataset_builder import need_to_build_dataset
 from mindspeed_llm.training.utils import compute_actual_seq_len
 
 logger = logging.getLogger(__name__)
@@ -163,7 +164,11 @@ class DecoderPackedMTFDataset(torch.utils.data.Dataset):
         zeros_nums = counter.pop(0) if 0 in counter.keys() else 0
         for key in sorted(counter.keys()):
             position_ids += [i for i in range(counter[key])]
-        position_ids += [0] * zeros_nums
+        ## zhh: all [0] will cause sequence fragmentation because actual_seq_len only relies on position_ids
+        ## zhh: BUT why not preprocess and store actual_seq_len in data files.
+        ## zhh: actual_seq_len is the same as cu_seqlens in flash attention
+        # position_ids += [0] * zeros_nums
+        position_ids += [i for i in range(zeros_nums)]
         return torch.tensor(position_ids, dtype=torch.long, device=data.device)
 
     def __getitem__(self, idx):
@@ -252,7 +257,9 @@ class DecoderPackedMTFDataset(torch.utils.data.Dataset):
 
     def _cut_token(self, token, dtype):
         token_length = len(token)
-        if not self.args.no_cut_token and token_length >= self.seq_length:
+        if not self.args.no_cut_token and token_length > self.seq_length:
+            ## zhh: make sure the data are preprocessed ahead, DO NOT apply truncation here!
+            raise Exception("DO NOT apply truncation on the fly!")
             token = token[:self.seq_length]
         return token.astype(dtype)
 
@@ -266,6 +273,9 @@ class DecoderPackedMTFDataset(torch.utils.data.Dataset):
                     "attention_mask": np.ones_like(item["input_ids"]).astype(dtype),
                     "labels": item["labels"].astype(dtype)
                 }
+
+            ## zhh: make sure the data are preprocessed ahead, DO NOT apply truncation here!
+            raise Exception("DO NOT apply truncation on the fly!")
 
             template = None
             # get model chat template
@@ -324,7 +334,10 @@ class DecoderPackedMTFDataset(torch.utils.data.Dataset):
 
         else:
             prompt_ids = item["input_ids"]
-            input_ids = prompt_ids[:self.seq_length]
+            ## zhh: make sure the data are preprocessed ahead, DO NOT apply truncation here!
+            if len(prompt_ids) > self.seq_length:
+                raise Exception("DO NOT apply truncation on the fly!")
+                input_ids = prompt_ids[:self.seq_length]
 
             add_vals = {}
             for add_keys in self.args.dataset_additional_keys:
@@ -333,8 +346,8 @@ class DecoderPackedMTFDataset(torch.utils.data.Dataset):
 
             res = dict(
                 {
-                    "input_ids": input_ids.astype(dtype),
-                    "attention_mask": np.ones_like(input_ids).astype(dtype)
+                    "input_ids": prompt_ids.astype(dtype),
+                    "attention_mask": np.ones_like(prompt_ids).astype(dtype)
                 }, **add_vals
             )
 
@@ -342,30 +355,35 @@ class DecoderPackedMTFDataset(torch.utils.data.Dataset):
 
     def _cut_pairwise_token(self, item, dtype):
         """Cut prompt and response proportionally for pairwise datasets."""
-        IGNORE_INDEX = -100
-        prompt_length = (item["chosen_labels"] != IGNORE_INDEX).nonzero()[0][0]
-        prompt_ids = item["chosen_input_ids"][:prompt_length]
-        chosen_ids = item["chosen_input_ids"][prompt_length:]
-        rejected_ids = item["rejected_input_ids"][prompt_length:]
-        source_len, target_len = _infer_seqlen(
-            len(prompt_ids), max(len(chosen_ids), len(rejected_ids)), self.seq_length
-        )
-        prompt_ids = prompt_ids[:source_len]
-        chosen_ids = chosen_ids[:target_len]
-        rejected_ids = rejected_ids[:target_len]
-
-        chosen_input_ids = np.append(prompt_ids, chosen_ids)
-        chosen_labels = np.append(IGNORE_INDEX * np.ones(source_len), chosen_ids)
-        rejected_input_ids = np.append(prompt_ids, rejected_ids)
-        rejected_labels = np.append(IGNORE_INDEX * np.ones(source_len), rejected_ids)
+        chosen_token_length = len(item["chosen_input_ids"])
+        rejected_token_length = len(item["rejected_input_ids"])
+        if chosen_token_length > self.seq_length or rejected_token_length > self.seq_length:
+            ## zhh: make sure the data are preprocessed ahead, DO NOT apply truncation here!
+            raise Exception("DO NOT apply truncation on the fly!")
+        # IGNORE_INDEX = -100
+        # prompt_length = (item["chosen_labels"] != IGNORE_INDEX).nonzero()[0][0]
+        # prompt_ids = item["chosen_input_ids"][:prompt_length]
+        # chosen_ids = item["chosen_input_ids"][prompt_length:]
+        # rejected_ids = item["rejected_input_ids"][prompt_length:]
+        # source_len, target_len = _infer_seqlen(
+        #     len(prompt_ids), max(len(chosen_ids), len(rejected_ids)), self.seq_length
+        # )
+        # prompt_ids = prompt_ids[:source_len]
+        # chosen_ids = chosen_ids[:target_len]
+        # rejected_ids = rejected_ids[:target_len]
+        #
+        # chosen_input_ids = np.append(prompt_ids, chosen_ids)
+        # chosen_labels = np.append(IGNORE_INDEX * np.ones(source_len), chosen_ids)
+        # rejected_input_ids = np.append(prompt_ids, rejected_ids)
+        # rejected_labels = np.append(IGNORE_INDEX * np.ones(source_len), rejected_ids)
 
         res = {
-            "chosen_input_ids": chosen_input_ids.astype(dtype),
-            "chosen_attention_mask": np.ones_like(chosen_input_ids).astype(dtype),
-            "chosen_labels": chosen_labels.astype(dtype),
-            "rejected_input_ids": rejected_input_ids.astype(dtype),
-            "rejected_attention_mask": np.ones_like(rejected_input_ids).astype(dtype),
-            "rejected_labels": rejected_labels.astype(dtype)
+            "chosen_input_ids": item["chosen_input_ids"].astype(dtype),
+            "chosen_attention_mask": np.ones_like(item["chosen_input_ids"]).astype(dtype),
+            "chosen_labels": item["chosen_labels"].astype(dtype),
+            "rejected_input_ids": item["rejected_input_ids"].astype(dtype),
+            "rejected_attention_mask": np.ones_like(item["rejected_input_ids"]).astype(dtype),
+            "rejected_labels": item["rejected_labels"].astype(dtype)
         }
 
         return res
@@ -435,7 +453,9 @@ def _build_index_mappings(
     shuffle_idx_filename = _filename + '_decoder_packed_idx.npy'
 
     # Build the indexed mapping if not exist.
-    if torch.distributed.get_rank() % torch.cuda.device_count() == 0 or args.stage in ["ray_ppo", "ray_online_dpo", "ray_grpo"]:
+    ## zhh: delegate rank selection to need_to_build_dataset() (no_shared_storage / TP aware);
+    ## OBS_UNAVAILABLE env override to be added into that function later.
+    if need_to_build_dataset() or args.stage in ["ray_ppo", "ray_online_dpo", "ray_grpo"]:
         if not os.path.isfile(shuffle_idx_filename):
 
             print_rank_0(' > WARNING: could not find index map files, building '

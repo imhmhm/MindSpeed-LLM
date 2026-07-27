@@ -764,6 +764,12 @@ class IndexedDatasetBuilder(object):
         self.document_indices = [0]
         self.sequence_modes = [] if self.multimodal else None
 
+    def add_item_np_bytes(self, np_array_bytes, array_size, mode: int = 0):
+        self.data_file.write(np_array_bytes)
+        self.sequence_lengths.append(array_size)
+        if self.multimodal:
+            self.sequence_modes.append(mode)
+
     def add_item(self, tensor: torch.Tensor, mode: int = 0) -> None:
         """Add a single item to the dataset
 
@@ -792,6 +798,13 @@ class IndexedDatasetBuilder(object):
         """
         np_array = numpy.array(tensor, dtype=self.dtype)
         self.data_file.write(np_array.tobytes(order="C"))
+        self.sequence_lengths.extend(lengths)
+        self.document_indices.append(len(self.sequence_lengths))
+        if self.multimodal:
+            self.sequence_modes.extend(modes if modes is not None else [0] * lengths)
+
+    def add_document_np_bytes(self, np_array_bytes, lengths: List[int], modes: Optional[List[int]] = None):
+        self.data_file.write(np_array_bytes)
         self.sequence_lengths.extend(lengths)
         self.document_indices.append(len(self.sequence_lengths))
         if self.multimodal:
