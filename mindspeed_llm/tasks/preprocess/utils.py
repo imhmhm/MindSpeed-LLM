@@ -17,6 +17,7 @@ import bisect
 import os
 import json
 import logging
+import random
 from functools import partial
 from typing import Any, Dict, List, Sequence
 from datasets import load_dataset, concatenate_datasets, interleave_datasets
@@ -623,3 +624,31 @@ def greedy_knapsack(numbers: List[int], capacity: int) -> List[List[int]]:
         knapsacks.append(current_knapsack)
 
     return knapsacks
+
+
+def random_packing(numbers: List[int], capacity: int) -> List[List[int]]:
+
+    num_samples = len(numbers)
+    random.shuffle(numbers)
+    packs = []
+
+    while numbers:
+        current_pack = []
+        remaining_capacity = capacity
+
+        while remaining_capacity > 0:
+            if numbers:
+                remaining_capacity -= numbers[0]
+            else:
+                remaining_capacity = -1
+            if remaining_capacity < 0:
+                break
+
+            current_pack.append(numbers.pop(0))
+
+        packs.append(current_pack)
+
+    if sum([len(indices) for indices in packs]) != num_samples:
+        raise ValueError("number of samples after packing is not correct")
+
+    return packs
