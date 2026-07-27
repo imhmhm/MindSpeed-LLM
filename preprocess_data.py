@@ -115,7 +115,7 @@ def add_data_args(parser):
     group.add_argument('--prompt-type', type=str, default=None,
                        choices=['default', 'empty', 'trl', 'chatglm2', 'chatglm3', 'chatglm3_system', 'glm4', 'glm4_moe', 'chatml', 'bailing_mini',
                                 'chatml_de', 'qwen', 'qwen_r1', "qwen_math_r1", 'llama3', 'llama2', 'mistral', 'mixtral', 'gemma', 'alpaca',
-                                'deepseek2', 'deepseek2-lite', 'cpm', 'baichuan2', 'deepseek3', 'intern2', 'hunyuan', 'qwen3', 'magistral', 'plm', 'qwen_lf', 'gpt_oss'],
+                                'deepseek2', 'deepseek2-lite', 'cpm', 'baichuan2', 'deepseek3', 'intern2', 'hunyuan', 'qwen3', 'magistral', 'plm', 'qwen_lf', 'gpt_oss', 'ailab_slm'],
                        help='Which template to use for constructing prompts in training.'
                             'e.g., "qwen"')
     group.add_argument('--prompt-type-path', type=str, default=TEMPLATES_DIR,
@@ -166,7 +166,7 @@ def add_tokenizer_args(parser):
     group = parser.add_argument_group(title='tokenizer')
     group.add_argument('--tokenizer-type', type=str, default='PretrainedFromHF',
                        choices=['BertWordPieceLowerCase', 'BertWordPieceCase',
-                                'GPT2BPETokenizer', 'GPTSentencePieceTokenizer', 'PretrainedFromHF', 'MagistralTokenizer'],
+                                'GPT2BPETokenizer', 'GPTSentencePieceTokenizer', 'PretrainedFromHF', 'MagistralTokenizer', 'PanguSentencePieceTokenizer'],
                        help='What type of tokenizer to use.')
     group.add_argument("--tokenizer-not-use-fast", action='store_false',
                        help="HuggingFace tokenizer not use the fast version.")
@@ -198,6 +198,8 @@ def add_tokenizer_args(parser):
         default=[],
         help="The labels represent the correctness of each reasoning step in the entire reasoning process.",
     )
+    group.add_argument('--hf-chat-template', action='store_true', default=False,
+                       help="Using Huggingface chat template")
 
 
 def add_output_args(parser):

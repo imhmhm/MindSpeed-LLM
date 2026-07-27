@@ -162,3 +162,36 @@ class ToolFormatter(Formatter):
     @override
     def extract(self, content: str) -> str | list["FunctionCall"]:
         return self.tool_utils.tool_extractor(content)
+
+
+@dataclass
+class ObservationFormatter(StringFormatter):
+    r"""Formatter for tool-observation messages.
+
+    For ``tool_format == "ailab_slm"`` the observation text is generated via
+    ``AILabSLMToolUtils.observation_formatter`` (the full user/observation/assistant
+    turn); ``slots`` may be empty (the generated string is returned directly) or contain
+    ``{{content}}`` (the generated string is substituted into it). For other tool_formats
+    it behaves as a plain StringFormatter.
+    """
+
+    def __post_init__(self):
+        if self.tool_format == "ailab_slm":
+            self.tool_utils = get_tool_utils(self.tool_format)
+            # ailab_slm builds the observation text via tool_utils; slots may be empty,
+            # so skip StringFormatter's placeholder requirement.
+        else:
+            super().__post_init__()
+            self.tool_utils = None
+
+    @override
+    def apply(self, **kwargs) -> SLOTS:
+        if self.tool_format == "ailab_slm":
+            observations = kwargs.pop("content")
+            if not isinstance(observations, list):
+                observations = [observations]
+            observation_str = self.tool_utils.observation_formatter(observations)
+            if self.slots:
+                return super().apply(content=observation_str)
+            return [observation_str]
+        return super().apply(**kwargs)

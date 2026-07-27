@@ -885,6 +885,71 @@ class LFM2ToolUtils(ToolUtils):
         return results if results else content
 
 
+AILabSLM_TOOL_PROMPT = (
+    "\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\n"
+    "You have access to the following functions within <tools></tools> XML tags:\n<tools>{tool_text}"
+    "\n</tools>\n\nFor each function call, return a json object with function name and arguments within "
+    """[extra_id_250][extra_id_251] marks:\n[extra_id_250]\n{{"name": <function-name>, """
+    """"arguments": <args-json-object>}}\n[extra_id_251]"""
+)
+
+
+@dataclass
+class AILabSLMToolUtils(ToolUtils):
+    r"""AILabSLM tool format (MindSpeed-LLM extension).
+
+    Uses ``[extra_id_250/251]`` for tool calls and ``[extra_id_252/253/254/255]`` for
+    observations. Adds a 4th method ``observation_formatter`` consumed by
+    ``ObservationFormatter`` (not part of the LlamaFactory ToolUtils ABC).
+    """
+
+    @override
+    @staticmethod
+    def tool_formatter(tools: list[dict[str, Any]]) -> str:
+        tool_text = ""
+        for tool in tools:
+            wrapped_tool = tool if tool.get("type") == "function" else {"type": "function", "function": tool}
+            tool_text += "\n" + json.dumps(wrapped_tool, ensure_ascii=False)
+
+        return AILabSLM_TOOL_PROMPT.format(tool_text=tool_text)
+
+    @override
+    @staticmethod
+    def function_formatter(functions: list["FunctionCall"]) -> str:
+        function_texts = [
+            json.dumps({"name": name, "arguments": json.loads(arguments)}, ensure_ascii=False)
+            for name, arguments in functions
+        ]
+        return "\n".join([f"[extra_id_250]\n{text}\n[extra_id_251]" for text in function_texts])
+
+    @override
+    @staticmethod
+    def tool_extractor(content: str) -> Union[str, list["FunctionCall"]]:
+        regex = re.compile(r"\[extra_id_250\](.+?)\[extra_id_251\](?=\s*\[extra_id_250\]|\s*$)", re.DOTALL)
+        tool_match: list[str] = re.findall(regex, content)
+        if not tool_match:
+            return content
+
+        results = []
+        for tool in tool_match:
+            try:
+                tool = json.loads(tool.strip())
+            except json.JSONDecodeError:
+                return content
+
+            if "name" not in tool or "arguments" not in tool:
+                return content
+
+            results.append(FunctionCall(tool["name"], json.dumps(tool["arguments"], ensure_ascii=False)))
+
+        return results
+
+    @staticmethod
+    def observation_formatter(observations: list[str]) -> str:
+        contents = "\n".join([f"[extra_id_252]\n{_ob}\n[extra_id_253]" for _ob in observations])
+        return f"[extra_id_254]user\n{contents}[extra_id_255]\n[extra_id_254]assistant\n"
+
+
 TOOLS = {
     "default": DefaultToolUtils(),
     "gemma4": Gemma4ToolUtils(),
@@ -899,6 +964,7 @@ TOOLS = {
     "glm4_moe": GLM4MOEToolUtils(),
     "seed_oss": SeedToolUtils(),
     "ling": LingToolUtils(),
+    "ailab_slm": AILabSLMToolUtils(),
 }
 
 
