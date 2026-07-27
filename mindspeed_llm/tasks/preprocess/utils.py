@@ -312,8 +312,16 @@ def convert_sharegpt_to_intermediate(
     if dataset_attr.system_tag and messages[0][dataset_attr.role_tag] == dataset_attr.system_tag:
         system = messages[0][dataset_attr.content_tag]
         messages = messages[1:]
+    elif dataset_attr.system_tag and messages[-1][dataset_attr.role_tag] == dataset_attr.system_tag:
+        system = messages[-1][dataset_attr.content_tag]
+        messages = messages[:-1]
     else:
         system = sample[dataset_attr.system] if dataset_attr.system else ""
+        ## zhh:
+        ## if system is provided in separate attr, it should be string
+        ## BUT siye data might contain `['', '']`
+        if isinstance(system, list):
+            system = "".join(system)
 
     if len(messages) == 0:
         return outputs
@@ -321,6 +329,13 @@ def convert_sharegpt_to_intermediate(
     aligned_messages = []
     broken_data = False
     for turn_idx, message in enumerate(messages):
+        if dataset_attr.ranking and dataset_attr.messages in [dataset_attr.chosen, dataset_attr.rejected]:
+            ## zhh: pairwise example
+            ## if chose and rejected are full lists of dialogues
+            ## get the ones BEFORE last assistant for messages
+            ## leave the last assistant out for pairwise example
+            if turn_idx == len(messages) - 1:
+                break
         if message[dataset_attr.role_tag] not in accept_tags[turn_idx % 2]:
             logger.warning("Invalid role tag in {}.".format(messages))
             broken_data = True
@@ -340,13 +355,19 @@ def convert_sharegpt_to_intermediate(
         logger.warning("Invalid message count in {}.".format(messages))
         broken_data = True
 
-    elif (
-            dataset_attr.ranking
-            and isinstance(sample[dataset_attr.chosen], dict)
-            and isinstance(sample[dataset_attr.rejected], dict)
-    ):  # pairwise example
-        chosen = sample[dataset_attr.chosen]
-        rejected = sample[dataset_attr.rejected]
+    elif dataset_attr.ranking:
+        # pairwise example
+        if isinstance(sample[dataset_attr.chosen], dict) and isinstance(sample[dataset_attr.rejected], dict):
+            chosen = sample[dataset_attr.chosen]
+            rejected = sample[dataset_attr.rejected]
+        elif isinstance(sample[dataset_attr.chosen], list) and isinstance(sample[dataset_attr.rejected], list):
+            ## zhh:
+            ## if chose and rejected are full lists of dialogues
+            ## get the last assistant for pairwise example
+            chosen = sample[dataset_attr.chosen][-1]
+            rejected = sample[dataset_attr.rejected][-1]
+        else:
+            raise Exception("Invalid pairwise data format!")
         if (
                 chosen[dataset_attr.role_tag] not in accept_tags[-1]
                 or rejected[dataset_attr.role_tag] not in accept_tags[-1]
