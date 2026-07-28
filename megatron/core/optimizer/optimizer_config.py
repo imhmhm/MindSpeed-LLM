@@ -105,6 +105,15 @@ class OptimizerConfig:
     sgd_momentum: float = 0.9
     """Momentum factor for SGD optimizer."""
 
+    # Muon.
+    muon_momentum: float = 0.95
+    """Momentum factor for Muon optimizer."""
+    muon_nesterov: bool = True
+    muon_ns_steps: int = 5
+    """Number of Newton-Schulz iterations for Muon (5 is enough)."""
+    muon_matched_adamw_rms: float = 0.2
+    """The AdamW update RMS muon is designed to match (0.2~0.4)."""
+
     #######################
     # Distributed optimizer
     #######################
