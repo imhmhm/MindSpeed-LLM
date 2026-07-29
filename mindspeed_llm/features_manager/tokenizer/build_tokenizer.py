@@ -14,6 +14,7 @@ class BuildTokenizerFeature(MindSpeedBuildTokenizerFeature):
     def register_args(self, parser):
         self.add_parser_argument_choices_value(parser, "--tokenizer-type", 'PretrainedFromHF')
         self.add_parser_argument_choices_value(parser, "--tokenizer-type", 'MagistralTokenizer')
+        self.add_parser_argument_choices_value(parser, "--tokenizer-type", 'AILabSentencePieceTokenizer')
 
         group = parser.add_argument_group(title=self.feature_name)
         group.add_argument("--tokenizer-name-or-path", type=str, default=None,
