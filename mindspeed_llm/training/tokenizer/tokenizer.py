@@ -23,6 +23,10 @@ from megatron.training.tokenizer.tokenizer import _vocab_size_with_padding
 from megatron.core.datasets.megatron_tokenizer import MegatronTokenizer
 from mindspeed_llm.tasks.preprocess.data_format_llamafactory import fix_model_tokenizer
 from mindspeed_llm.training.tokenizer.magistral_tokenizer import create_magistral_tokenizer
+from mindspeed_llm.tasks.utils.error_utils import ensure_valid
+
+import sentencepiece as spm
+import sentencepiece.sentencepiece_model_pb2 as model
 
 
 def build_tokenizer(args):
@@ -68,10 +72,16 @@ def build_tokenizer(args):
             fix_model_tokenizer(tokenizer.tokenizer, args.prompt_type.strip(), args.prompt_type_path.strip(),
                                 args.enable_thinking)
 
+    elif args.tokenizer_type == "AILabSentencePieceTokenizer":
+        tokenizer = _AILabSentencePieceTokenizer(args.vocab_file)
+        # Add vocab size (if not already set from a checkpoint).
+        if getattr(args, "padded_vocab_size", None) is None:
+            args.padded_vocab_size = _vocab_size_with_padding(tokenizer.vocab_size, args)
+
     else:
         tokenizer = TokenizerAdaptor(megatron_build_tokenizer(args))
 
-    is_valid_tokenizer_type = args.tokenizer_type not in ["GPTSentencePieceTokenizer", "MagistralTokenizer"]
+    is_valid_tokenizer_type = args.tokenizer_type not in ["GPTSentencePieceTokenizer", "MagistralTokenizer", "AILabSentencePieceTokenizer"]
     if hasattr(args, "prompt_type") and args.prompt_type is not None and is_valid_tokenizer_type:
         if hasattr(args, "handler_name") and args.handler_name == "HunyuanInstructionHandler":
             pass
@@ -266,3 +276,121 @@ def MagistralTokenizer_batch_decode(input_token, skip_special_tokens):
         result.append(tokenizer.tokenizer.decode(token))
 
     return "".join(result)
+
+
+class _AILabSentencePieceTokenizer(MegatronTokenizer):
+    """
+    AILab SentencePiece Tokenizer
+    """
+
+    def __init__(self, vocab_file, num_extra_ids=256,
+                 additional_special_tokens=None,
+                 replace_extra_ids=True):
+
+        _tokenizer_proto = model.ModelProto()
+        _tokenizer_proto.ParseFromString(open(vocab_file, "rb").read())
+
+        self.tokenizer = spm.SentencePieceProcessor(model_file=vocab_file)
+        self._skip_decoding_ids = [self.extra_id(i) for i in range(num_extra_ids)]
+
+        if additional_special_tokens is not None:
+            ensure_valid(isinstance(additional_special_tokens, (list, tuple)),
+                         error_message="additional_special_tokens should be a list or tuple")
+            ensure_valid(all(isinstance(t, str) for t in additional_special_tokens),
+                         error_message="the element of additional_special_tokens should be str")
+            if replace_extra_ids:
+                ensure_valid(
+                    len(additional_special_tokens) <= num_extra_ids,
+                    error_message=f"additional_special_tokens count {len(additional_special_tokens)}"
+                                  f" exceeds extra_ids count {num_extra_ids}"
+                )
+
+            for i, _additional_special_token in enumerate(additional_special_tokens):
+                if replace_extra_ids:
+                    _tokenizer_proto.pieces[self.extra_id(i)].piece = _additional_special_token
+                else:
+                    new_token = model.ModelProto().SentencePiece()
+                    new_token.piece = _additional_special_token
+                    new_token.score = 0
+                    new_token.type = 4
+                    ## ---------------------
+                    ## token type
+                    ## 1: NORMAL 2: UNKNOWN 3: CONTROL 4: USER_DEFINED 5: UNUSED 6: BYTE
+                    ## ---------------------
+                    _tokenizer_proto.pieces.append(new_token)
+                    self._skip_decoding_ids.append(self.vocab_size()+i)
+
+            self.tokenizer = spm.SentencePieceProcessor(model_proto=_tokenizer_proto.SerializeToString())
+
+        name = "AILabSentencePiece"
+        super().__init__(name)
+
+    @property
+    def vocab_size(self):
+        """
+        zhv4_env2_codev2.model: 63750
+        zhencode_mix_v3.4.model: 64512
+        zhencode_mix_v5.1.model: 64194
+        zhencode_mix_v5.2.model: 64427
+        """
+        return self.tokenizer.get_piece_size()
+
+    @property
+    def vocab(self):
+        return self.tokenizer
+
+    @property
+    def inv_vocab(self):
+        return None
+
+    def tokenize(self, text):
+        return self.tokenizer.encode_as_ids(text)
+
+    def detokenize(self, token_ids, skip_extra_ids=False):
+        if skip_extra_ids:
+            token_ids = [id_ for id_ in token_ids if id_ not in self._skip_decoding_ids]
+        return self.tokenizer.decode_ids(token_ids)
+
+    @property
+    def unk(self):
+        return self.tokenizer.piece_to_id('<unk>')
+
+    @property
+    def bos(self):
+        return self.tokenizer.piece_to_id('<s>')
+
+    @property
+    def eos(self):
+        return self.tokenizer.piece_to_id('</s>')
+
+    @property
+    def eod(self):
+        return self.eos
+
+    @property
+    def pad(self):
+        return self.tokenizer.piece_to_id('<pad>')
+
+    @property
+    def cls(self):
+        return self.tokenizer.piece_to_id('<cls>')
+
+    @property
+    def mask(self):
+        return self.tokenizer.piece_to_id('<mask>')
+
+    @property
+    def sep(self):
+        return self.tokenizer.piece_to_id('<sep>')
+
+    def extra_id(self, i):
+        """
+        return the token id of extra_id_{i}
+            zhencode_mix_v3.4.model: 94-774 0-680
+            zhencode_mix_v5.1.model: 87-342 0-255
+            zhencode_mix_v5.2.model: 85-340 0-255
+        """
+        if self.tokenizer.piece_to_id(f'[extra_id_{i}]') == 0:
+            raise ValueError(f"invalid [extra_id_{i}],"
+                             f" check if it is replaced by any of additional_special_tokens")
+        return self.tokenizer.piece_to_id(f'[extra_id_{i}]')
