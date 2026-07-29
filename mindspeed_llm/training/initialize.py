@@ -25,7 +25,7 @@ from megatron.training import get_args, print_rank_0
 from megatron.training.arguments import validate_args
 from megatron.training.yaml_arguments import validate_yaml
 from megatron.training.checkpointing import load_args_from_checkpoint
-from megatron.training.global_vars import set_global_variables
+from megatron.training.global_vars import set_global_variables, _build_tokenizer
 from megatron.training.initialize import (
     _initialize_distributed, _set_random_seed,
     _init_autoresume, _initialize_tp_communicators,
@@ -93,7 +93,7 @@ def initialize_megatron(
 
     # set global args, build tokenizer, and set adlr-autoresume,
     # tensorboard-writer, and timers.
-    set_global_variables(args)
+    set_global_variables(args, build_tokenizer=False)
 
     # add deterministic computing function
     if args.use_deter_comp:
@@ -138,6 +138,13 @@ def initialize_megatron(
 
         if args.tp_comm_overlap:
             _initialize_tp_communicators()
+
+        ## zhh: move build_tokenizer after torch.distributed.init_process_group
+        ## Huggingface remote codes (e.g. customized HF tokenizers) will be written to
+        ## cache dir by each process, and might cause corrupted files. This could be HF bugs.
+        torch.distributed.barrier()
+        time.sleep(args.local_rank)
+        _build_tokenizer(args)
 
         # No continuation function
         return None
