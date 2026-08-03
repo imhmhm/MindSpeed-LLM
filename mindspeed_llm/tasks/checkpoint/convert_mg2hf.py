@@ -50,6 +50,10 @@ class Mg2HfConvert(Convert):
 
         self.iter_path = self.get_iter_path(args.load_dir)
         self.save_dir = args.save_dir
+        ## zhh: [mg2hf] optional iter_XXXXXXX subdir for batch conversion
+        ## getattr: training-side save (from_train=True) passes training args without this flag
+        if getattr(args, 'ckpt_iter', None) is not None:
+            self.save_dir = os.path.join(self.save_dir, f"iter_{int(args.ckpt_iter):07d}")
         self.hf_cfg_dir = args.hf_cfg_dir
         self.lora_r = args.lora_r
         self.lora_alpha = args.lora_alpha
@@ -1480,5 +1484,9 @@ class Mg2HfConvert(Convert):
         if self.save_lora_to_hf:
             self.write_adapter_config()
             logger.info("Successfully convert lora to hf!")
+
+        ## zhh: [mg2hf] merge per-shard safetensors into a single model.safetensors
+        if self.merge_layers_safetensors:
+            self.merge_safetensors(self.save_dir, os.path.join(self.save_dir, "model.safetensors"))
 
         logger.info("Done!")
