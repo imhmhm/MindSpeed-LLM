@@ -21,7 +21,7 @@ def get_args():
     parser.add_argument('--save-dir', type=str, required=True,
                         help='Directory to save model checkpoint to')
     parser.add_argument('--model-type-hf', type=str, default="qwen3",
-                        choices=['qwen3', 'qwen3-moe', 'deepseek3', 'glm45-moe', 'bailing_mini', 'qwen3-next', 'seed-oss', 'deepseek32', 'magistral', 'deepseek2-lite', 'phi3.5', 'mamba2', 'longcat', 'glm5'],
+                        choices=['qwen3', 'qwen3-moe', 'deepseek3', 'glm45-moe', 'bailing_mini', 'qwen3-next', 'seed-oss', 'deepseek32', 'magistral', 'deepseek2-lite', 'phi3.5', 'mamba2', 'longcat', 'glm5', 'llama2'],
                         help='model type of huggingface')
     parser.add_argument('--target-tensor-parallel-size', type=int, default=1,
                         help='Target tensor model parallel size, defaults to 1.')
@@ -75,6 +75,10 @@ def get_args():
     parser.add_argument('--lora-alpha', type=int, default=None, help='Lora alpha.')
     parser.add_argument('--lora-target-modules', nargs='+', type=str, default=[], help='Lora target modules.')
     parser.add_argument('--save-lora-to-hf', action='store_true', help='only save lora ckpt to hf.')
+    parser.add_argument('--merge-layers-safetensors', action='store_true',
+                        help='merge the saved safetensors of each layer to a whole `model.safetensors`.')
+    parser.add_argument('--ckpt-iter', type=str, default=None,
+                        help='iteration tag appended to save-dir as iter_XXXXXXX subdir (mg2hf batch convert)')
     args, _ = parser.parse_known_args()
     return args
 
