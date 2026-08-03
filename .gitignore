@@ -148,3 +148,20 @@ cython_debug/
 /logs/
 /model_from_hf/
 /model_weights/
+
+# preprocess_data: track only the listed files, ignore everything else
+preprocess_data/*
+!preprocess_data/__init__.py
+!preprocess_data/base.py
+!preprocess_data/convert_methods.py
+!preprocess_data/convert_methods_vehicle.py
+!preprocess_data/demo_pretrain.sh
+!preprocess_data/demo_rl.sh
+!preprocess_data/demo_sft_no_pack.sh
+!preprocess_data/demo_sft_pack.sh
+!preprocess_data/preprocess_data_pretrain.py
+!preprocess_data/preprocess_data_rl.py
+!preprocess_data/preprocess_data_sft_no_pack.py
+!preprocess_data/preprocess_data_sft_pack.py
+!preprocess_data/preview_ml_data.ipynb
+!preprocess_data/utils.py
