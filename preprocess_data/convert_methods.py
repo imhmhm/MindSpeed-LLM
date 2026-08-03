@@ -4,7 +4,7 @@ from functools import partial
 from dataclasses import dataclass
 from enum import Enum, unique
 from typing import List, Sequence, Dict, Any, Literal, Optional, Union
-from mindspeed_llm.tasks.preprocess.utils import convert_sharegpt_to_intermediate
+from mindspeed_llm.tasks.preprocess.utils import convert_sharegpt_to_intermediate, convert_alpaca_to_intermediate
 from preprocess_data.convert_methods_vehicle import (
     convert_vehicle_labeled_action_to_intermediate,
     convert_vehicle_labeled_ori_to_intermediate,
@@ -157,7 +157,7 @@ def convert_dapo_math_17k_processed_to_intermediate(sample: Dict[str, Union[List
     return outputs
 
 
-def convert_alpaca_to_intermediate(sample: Dict[str, List[Any]], dataset_attr: "InstructionDatasetAttr"):
+def _convert_alpaca_to_intermediate(sample: Dict[str, List[Any]], dataset_attr: "InstructionDatasetAttr"):
     """
     https://huggingface.co/datasets/agentica-org/DeepScaleR-Preview-Dataset
     """
