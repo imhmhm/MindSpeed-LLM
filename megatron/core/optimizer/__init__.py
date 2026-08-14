@@ -406,12 +406,6 @@ def _get_megatron_optimizer_based_on_param_groups(
             )
             init_state_fn = None
         elif config.optimizer == 'muon':
-            assert config.use_distributed_optimizer, \
-                "Muon optimizer requires --use-distributed-optimizer"
-            assert not config.use_precision_aware_optimizer, \
-                "Muon optimizer is incompatible with --use-precision-aware-optimizer"
-            assert not config.optimizer_cpu_offload, \
-                "Muon optimizer is incompatible with --optimizer-cpu-offload"
             optimizer = Muon(
                 param_groups,
                 lr=config.lr,
