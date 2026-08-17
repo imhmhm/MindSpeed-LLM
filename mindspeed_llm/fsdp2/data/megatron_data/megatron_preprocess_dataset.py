@@ -158,7 +158,7 @@ def add_tokenizer_args(parser):
                        choices=['BertWordPieceLowerCase', 'BertWordPieceCase',
                                 'GPT2BPETokenizer', 'GPTSentencePieceTokenizer', 'PretrainedFromHF', 'MagistralTokenizer'],
                        help='What type of tokenizer to use.')
-    group.add_argument("--tokenizer-not-use-fast", action='store_false',
+    group.add_argument("--tokenizer-not-use-fast", action='store_false', dest='tokenizer_use_fast',
                        help="HuggingFace tokenizer not use the fast version.")
     group.add_argument('--vocab-file', type=str, default=None,
                        help='Path to the vocab file')

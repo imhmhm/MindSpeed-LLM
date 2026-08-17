@@ -29,7 +29,7 @@ class BuildTokenizerFeature(MindSpeedBuildTokenizerFeature):
         group = parser.add_argument_group(title=self.feature_name)
         group.add_argument("--tokenizer-name-or-path", type=str, default=None,
                             help="Name or path of the huggingface tokenizer.")
-        group.add_argument("--tokenizer-not-use-fast", action='store_false',
+        group.add_argument("--tokenizer-not-use-fast", action='store_false', dest='tokenizer_use_fast',
                             help="HuggingFace tokenizer not use the fast version.")
         group.add_argument('--padded-vocab-size', type=int, default=None,
                             help='set padded vocab size')
