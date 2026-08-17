@@ -165,3 +165,5 @@ preprocess_data/*
 !preprocess_data/preprocess_data_sft_pack.py
 !preprocess_data/preview_ml_data.ipynb
 !preprocess_data/utils.py
+# build artifact: compiled dataset helpers
+megatron/core/datasets/*.so
