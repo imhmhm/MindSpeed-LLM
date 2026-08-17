@@ -3,20 +3,30 @@ PROJECT_ROOT=$(cd "$SCRIPT_DIR/.." && pwd -P)
 export PYTHONPATH=$PROJECT_ROOT:$PYTHONPATH
 cd $PROJECT_ROOT
 
-## ========  model and input dir  ======== ##
+## ========  model/input/output  ======== ##
+
 PATH_ROOT=/home/ma-user/work/dataset/huashan_zhh_guiyang_pfs
 # MODEL=Qwen3-0.6B
 # PROMPT_TYPE=qwen3
 MODEL=ailab_slm_0_5b
 PROMPT_TYPE=ailab_slm
 SEQ_LEN=32768
-PACKING_METHOD=random  ## knapsack / random
+PACKING_METHOD=knapsack  ## knapsack / random
 #### processing in /cache is much faster
 COPY_TO_CACHE=true
 
+# INPUT_SUBDIR=hf_data/MegaScience/data
 # INPUT_SUBDIR=hf_data/MegaScience/jsonl/MegaScience_nemotron_science.jsonl
 INPUT_SUBDIR=hf_data/MegaScience/data/*.parquet
-# INPUT_SUBDIR=hf_data/MegaScience/data
+OUTPUT_SUBDIR_PREFIX=ml_data/ml_data__${MODEL}_${SEQ_LEN}_pack/MegaScience/MegaScience__${PACKING_METHOD}
+
+## ========  dataset attr ======== ##
+
+CONVERT_METHOD="alpaca"
+MAP_KEYS='{"prompt":"question", "query":"", "response":"answer", "system":""}'
+# CONVERT_METHOD="sharegpt"
+# MAP_KEYS='{"messages":"data", "system":"meta_prompt", "role_tag":"role", "content_tag":"content", "user_tag":"user", "assistant_tag":"assistant", "system_tag": "system", "observation_tag":"tool"}'
+
 ## ======================================== ##
 
 MODEL_DIR=${PATH_ROOT}/hf_model/${MODEL}
@@ -28,24 +38,13 @@ if [ "$COPY_TO_CACHE" = true ]; then
     INPUT_DIR=/cache/${INPUT_SUBDIR}
 fi
 
-## ========  dataset attr and output dir ======== ##
-CONVERT_METHOD="alpaca"
-MAP_KEYS='{"prompt":"question", "query":"", "response":"answer", "system":""}'
-# CONVERT_METHOD="sharegpt"
-# MAP_KEYS='{"messages":"data", "system":"meta_prompt", "role_tag":"role", "content_tag":"content", "user_tag":"user", "assistant_tag":"assistant", "system_tag": "system", "observation_tag":"tool"}'
-
-OUTPUT_SUBDIR=ml_data/ml_data__${MODEL}_${SEQ_LEN}_pack/MegaScience
-## ============================================== ##
-
-OUTPUT_DIR=${PATH_ROOT}/${OUTPUT_SUBDIR}
+OUTPUT_PREFIX=${PATH_ROOT}/${OUTPUT_SUBDIR_PREFIX}
 if [ "$COPY_TO_CACHE" = true ]; then
-    OUTPUT_DIR=/cache/${OUTPUT_SUBDIR}
+    OUTPUT_PREFIX=/cache/${OUTPUT_SUBDIR_PREFIX}
 fi
-mkdir -p $OUTPUT_DIR
+mkdir -p $(dirname "$OUTPUT_PREFIX")
 
-## ========  output prefix  ======== ##
-OUTPUT_PREFIX=${OUTPUT_DIR}/MegaScience
-## ================================= ##
+## ======================================== ##
 
 
 python preprocess_data/preprocess_data_sft_pack.py \
@@ -57,15 +56,17 @@ python preprocess_data/preprocess_data_sft_pack.py \
   --json-keys "input_ids" "attention_mask" "labels" \
   --tokenizer-name-or-path $MODEL_DIR \
   --tokenizer-type PretrainedFromHF \
+  --tokenizer-not-use-fast \
   --prompt-type $PROMPT_TYPE \
   --seq-length $SEQ_LEN \
   --output-prefix $OUTPUT_PREFIX \
   --clean-unmerged-indexed-dataset \
   --workers 8
 
+## ======================================== ##
 
 if [ "$COPY_TO_CACHE" = true ]; then
-    DEST_OUTPUT_DIR=${PATH_ROOT}/${OUTPUT_SUBDIR}
-    mkdir -p $(dirname "$DEST_OUTPUT_DIR")
-    cp -r $OUTPUT_DIR $DEST_OUTPUT_DIR
+    DEST_OUTPUT_DIR=$(dirname "${PATH_ROOT}/${OUTPUT_SUBDIR_PREFIX}")
+    mkdir -p $DEST_OUTPUT_DIR
+    cp -r ${OUTPUT_PREFIX}*.* $DEST_OUTPUT_DIR
 fi

@@ -3,7 +3,8 @@ PROJECT_ROOT=$(cd "$SCRIPT_DIR/.." && pwd -P)
 export PYTHONPATH=$PROJECT_ROOT:$PYTHONPATH
 cd $PROJECT_ROOT
 
-## ========  model and input dir  ======== ##
+## ========  model/input/output  ======== ##
+
 PATH_ROOT=/home/ma-user/work/dataset/huashan_zhh_guiyang_pfs
 # MODEL=Qwen3-0.6B
 # PROMPT_TYPE=qwen3
@@ -12,6 +13,8 @@ MODEL=ailab_slm_0_5b
 COPY_TO_CACHE=true
 
 INPUT_SUBDIR=corpus/encyclopedia_zh/wiki_ybk_dbk_others.jsonl
+OUTPUT_SUBDIR_PREFIX=ml_data/ml_data__${MODEL}/encyclopedia_zh/wiki_ybk_dbk_others/wiki_ybk_dbk_others
+
 ## ======================================== ##
 
 MODEL_DIR=${PATH_ROOT}/hf_model/${MODEL}
@@ -23,32 +26,28 @@ if [ "$COPY_TO_CACHE" = true ]; then
     INPUT_DIR=/cache/${INPUT_SUBDIR}
 fi
 
-## ========  output dir  ======== ##
-OUTPUT_SUBDIR=ml_data/ml_data__${MODEL}/encyclopedia_zh/wiki_ybk_dbk_others
-## ============================== ##
-
-OUTPUT_DIR=${PATH_ROOT}/${OUTPUT_SUBDIR}
+OUTPUT_PREFIX=${PATH_ROOT}/${OUTPUT_SUBDIR_PREFIX}
 if [ "$COPY_TO_CACHE" = true ]; then
-    OUTPUT_DIR=/cache/${OUTPUT_SUBDIR}
+    OUTPUT_PREFIX=/cache/${OUTPUT_SUBDIR_PREFIX}
 fi
-mkdir -p $OUTPUT_DIR
+mkdir -p $(dirname "$OUTPUT_PREFIX")
 
-## ========  output prefix  ======== ##
-OUTPUT_PREFIX=${OUTPUT_DIR}/wiki_ybk_dbk_others
-## ================================= ##
-
+## ======================================== ##
 
 python preprocess_data/preprocess_data_pretrain.py \
   --input $INPUT_DIR \
   --json-keys "text" \
   --tokenizer-type PretrainedFromHF \
+  --tokenizer-not-use-fast \
   --tokenizer-name-or-path $MODEL_DIR \
   --output-prefix $OUTPUT_PREFIX \
   --append-eod \
   --workers 64
 
+## ======================================== ##
+
 if [ "$COPY_TO_CACHE" = true ]; then
-    DEST_OUTPUT_DIR=${PATH_ROOT}/${OUTPUT_SUBDIR}
-    mkdir -p $(dirname "$DEST_OUTPUT_DIR")
-    cp -r $OUTPUT_DIR $DEST_OUTPUT_DIR
+    DEST_OUTPUT_DIR=$(dirname "${PATH_ROOT}/${OUTPUT_SUBDIR_PREFIX}")
+    mkdir -p $DEST_OUTPUT_DIR
+    cp -r ${OUTPUT_PREFIX}*.* $DEST_OUTPUT_DIR
 fi
