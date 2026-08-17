@@ -42,7 +42,7 @@ def add_preprocess_common_args(parser):
     # ===== shared args with mindspeed-llm ===== #
 
     group = parser.add_argument_group(title='features_manager.BuildTokenizerFeature')
-    group.add_argument("--tokenizer-not-use-fast", action='store_false',
+    group.add_argument("--tokenizer-not-use-fast", action='store_false', dest='tokenizer_use_fast',
                        help="HuggingFace tokenizer not use the fast version.")
     group.add_argument("--tokenizer-name-or-path", type=str, default=None,
                        help="Name or path of the huggingface tokenizer.")
