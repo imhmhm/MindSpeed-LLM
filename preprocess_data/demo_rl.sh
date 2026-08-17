@@ -3,7 +3,8 @@ PROJECT_ROOT=$(cd "$SCRIPT_DIR/.." && pwd -P)
 export PYTHONPATH=$PROJECT_ROOT:$PYTHONPATH
 cd $PROJECT_ROOT
 
-## ========  model and input dir  ======== ##
+## ========  model/input/output  ======== ##
+
 PATH_ROOT=/home/ma-user/work/dataset/huashan_zhh_guiyang_pfs
 # MODEL=Qwen3-0.6B
 # PROMPT_TYPE=qwen3
@@ -14,6 +15,15 @@ SEQ_LEN=2048
 COPY_TO_CACHE=true
 
 INPUT_SUBDIR=hf_data/DAPO-Math-17k/data
+OUTPUT_SUBDIR_PREFIX=ml_data/ml_data__${MODEL}_${SEQ_LEN}/dapo-math-17k/dapo-math-17k
+
+## ========  dataset attr ======== ##
+
+CONVERT_METHOD="dapo_math_17k"
+MAP_KEYS='{"prompt":"prompt", "query":"", "response":"reward_model", "system":""}'
+# CONVERT_METHOD="sharegpt"
+# MAP_KEYS='{"messages":"data", "system":"meta_prompt", "role_tag":"role", "content_tag":"content", "user_tag":"user", "assistant_tag":"assistant", "system_tag": "system", "observation_tag":"tool"}'
+
 ## ======================================== ##
 
 MODEL_DIR=${PATH_ROOT}/hf_model/${MODEL}
@@ -25,25 +35,13 @@ if [ "$COPY_TO_CACHE" = true ]; then
     INPUT_DIR=/cache/${INPUT_SUBDIR}
 fi
 
-## ========  dataset attr and output dir ======== ##
-CONVERT_METHOD="dapo_math_17k"
-MAP_KEYS='{"prompt":"prompt", "query":"", "response":"reward_model", "system":""}'
-# CONVERT_METHOD="sharegpt"
-# MAP_KEYS='{"messages":"data", "system":"meta_prompt", "role_tag":"role", "content_tag":"content", "user_tag":"user", "assistant_tag":"assistant", "system_tag": "system", "observation_tag":"tool"}'
-
-OUTPUT_SUBDIR=ml_data/ml_data__${MODEL}_${SEQ_LEN}/dapo-math-17k
-## ============================================== ##
-
-OUTPUT_DIR=${PATH_ROOT}/${OUTPUT_SUBDIR}
+OUTPUT_PREFIX=${PATH_ROOT}/${OUTPUT_SUBDIR_PREFIX}
 if [ "$COPY_TO_CACHE" = true ]; then
-    OUTPUT_DIR=/cache/${OUTPUT_SUBDIR}
+    OUTPUT_PREFIX=/cache/${OUTPUT_SUBDIR_PREFIX}
 fi
-mkdir -p $OUTPUT_DIR
+mkdir -p $(dirname "$OUTPUT_PREFIX")
 
-## ========  output prefix  ======== ##
-OUTPUT_PREFIX=${OUTPUT_DIR}/dapo-math-17k
-## ================================= ##
-
+## ======================================== ##
 
 python preprocess_data/preprocess_data_rl.py \
   --input $INPUT_DIR \
@@ -53,15 +51,17 @@ python preprocess_data/preprocess_data_rl.py \
   --dataset-additional-keys "labels" \
   --tokenizer-name-or-path $MODEL_DIR \
   --tokenizer-type PretrainedFromHF \
+  --tokenizer-not-use-fast \
   --prompt-type $PROMPT_TYPE \
   --seq-length $SEQ_LEN \
   --output-prefix $OUTPUT_PREFIX \
   --clean-unmerged-indexed-dataset \
   --workers 32
 
+## ======================================== ##
 
 if [ "$COPY_TO_CACHE" = true ]; then
-    DEST_OUTPUT_DIR=${PATH_ROOT}/${OUTPUT_SUBDIR}
-    mkdir -p $(dirname "$DEST_OUTPUT_DIR")
-    cp -r $OUTPUT_DIR $DEST_OUTPUT_DIR
+    DEST_OUTPUT_DIR=$(dirname "${PATH_ROOT}/${OUTPUT_SUBDIR_PREFIX}")
+    mkdir -p $DEST_OUTPUT_DIR
+    cp -r ${OUTPUT_PREFIX}*.* $DEST_OUTPUT_DIR
 fi
