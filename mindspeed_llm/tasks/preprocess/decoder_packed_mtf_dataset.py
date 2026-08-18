@@ -454,7 +454,6 @@ def _build_index_mappings(
 
     # Build the indexed mapping if not exist.
     ## zhh: delegate rank selection to need_to_build_dataset() (no_shared_storage / TP aware);
-    ## OBS_UNAVAILABLE env override to be added into that function later.
     if need_to_build_dataset() or args.stage in ["ray_ppo", "ray_online_dpo", "ray_grpo"]:
         if not os.path.isfile(shuffle_idx_filename):
 
