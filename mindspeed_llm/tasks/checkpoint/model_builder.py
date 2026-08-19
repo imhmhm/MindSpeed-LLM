@@ -251,6 +251,8 @@ class MegatronModel(Model):
             self.mg_path = args.load_dir
         else:
             self.mg_path = args.save_dir
+        ## zhh: getattr 兜底 -- 训练侧保存 (from_train=True) 传的是不含该 flag 的训练 args
+        self.ckpt_iter = getattr(args, 'ckpt_iter', None)
         self.load_mg_args(args)
         self.mla_mm_split = args.mla_mm_split
         self.mtp_num_layers = args.mtp_num_layers
@@ -260,29 +262,34 @@ class MegatronModel(Model):
 
 
     @staticmethod
-    def get_latest_checkpoint_model_file(load_dir, model_filename="model_optim_rng.pt"):
+    def get_latest_checkpoint_model_file(load_dir, model_filename="model_optim_rng.pt", iteration=None):
         """
         Get the sub-model path for the latest iteration (any sub-model) to extract structure or parameter information.
 
         Parameters:
         - load_dir: Main directory to load the model
         - model_filename: Sub-model filename (default is "model_optim_rng.pt")
+        - iteration: Iteration to read; falls back to latest_checkpointed_iteration.txt when None
 
         Returns:
         - out_iteration: Latest iteration number
         - input_model_dir: Iteration directory path
         - src_model_file: Full file path of any sub-model
         """
-        tracker_filename = os.path.join(load_dir, 'latest_checkpointed_iteration.txt')
+        ## zhh: 显式 iteration 优先, 避免批量转换时反复改写 tracker 文件
+        if iteration is None:
+            tracker_filename = os.path.join(load_dir, 'latest_checkpointed_iteration.txt')
 
-        try:
-            with open(tracker_filename, 'r') as f:
-                metastring = f.read().strip()
-                iteration = int(metastring)
-        except FileNotFoundError as e:
-            raise FileNotFoundError(f"Checkpoint tracker file not found at {tracker_filename}") from e
-        except ValueError as e:
-            raise ValueError(f"Invalid iteration value in {tracker_filename}: '{metastring}' is not an integer.") from e
+            try:
+                with open(tracker_filename, 'r') as f:
+                    metastring = f.read().strip()
+                    iteration = int(metastring)
+            except FileNotFoundError as e:
+                raise FileNotFoundError(f"Checkpoint tracker file not found at {tracker_filename}") from e
+            except ValueError as e:
+                raise ValueError(f"Invalid iteration value in {tracker_filename}: '{metastring}' is not an integer.") from e
+        else:
+            iteration = int(iteration)
 
         input_model_dir = os.path.join(load_dir, f'iter_{iteration:07d}')
         input_sub_models = os.listdir(input_model_dir)
@@ -299,7 +306,7 @@ class MegatronModel(Model):
             for key, value in config_value.items():
                 setattr(self, key, value)
         else:
-            src_model_file = self.get_latest_checkpoint_model_file(self.mg_path)
+            src_model_file = self.get_latest_checkpoint_model_file(self.mg_path, iteration=self.ckpt_iter)
             src_model = torch.load(src_model_file, map_location='cpu', weights_only=False)
             logger.info(f"Megatron arguments is loaded from {src_model_file}\n")
             ckpt_args = src_model['args'].__dict__
