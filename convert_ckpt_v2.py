@@ -78,7 +78,9 @@ def get_args():
     parser.add_argument('--merge-layers-safetensors', action='store_true',
                         help='merge the saved safetensors of each layer to a whole `model.safetensors`.')
     parser.add_argument('--ckpt-iter', type=str, default=None,
-                        help='iteration tag appended to save-dir as iter_XXXXXXX subdir (mg2hf batch convert)')
+                        help='iteration to convert (mg2hf batch convert): selects load-dir/iter_XXXXXXX '
+                             'instead of reading latest_checkpointed_iteration.txt, and is mirrored as '
+                             'an iter_XXXXXXX subdir under save-dir')
     args, _ = parser.parse_known_args()
     return args
 

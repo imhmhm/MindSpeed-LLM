@@ -48,12 +48,15 @@ class Mg2HfConvert(Convert):
         self.load_model = MegatronModel(args)
         self.save_model = HuggingFaceModel(args)
 
-        self.iter_path = self.get_iter_path(args.load_dir)
-        self.save_dir = args.save_dir
-        ## zhh: [mg2hf] optional iter_XXXXXXX subdir for batch conversion
+        ## zhh: [mg2hf] optional iter_XXXXXXX for batch conversion -- selects the source
+        ## iteration in place of latest_checkpointed_iteration.txt and mirrors it as a
+        ## save-dir subdir, so both ends stay consistent without rewriting the tracker file
         ## getattr: training-side save (from_train=True) passes training args without this flag
-        if getattr(args, 'ckpt_iter', None) is not None:
-            self.save_dir = os.path.join(self.save_dir, f"iter_{int(args.ckpt_iter):07d}")
+        ckpt_iter = getattr(args, 'ckpt_iter', None)
+        self.iter_path = self.get_iter_path(args.load_dir, ckpt_iter)
+        self.save_dir = args.save_dir
+        if ckpt_iter is not None:
+            self.save_dir = os.path.join(self.save_dir, f"iter_{int(ckpt_iter):07d}")
         self.hf_cfg_dir = args.hf_cfg_dir
         self.lora_r = args.lora_r
         self.lora_alpha = args.lora_alpha
@@ -148,10 +151,15 @@ class Mg2HfConvert(Convert):
                     iteration = int(f.read().strip())
             else:
                 raise FileNotFoundError(f"can not find {latest_iter_file}")
+        else:
+            iteration = int(iteration)
 
         directory = os.path.join(ckpt_path, f'iter_{iteration:07d}')
 
-        os.makedirs(directory, exist_ok=True)
+        ## zhh: 显式 iteration 时不建目录 -- 传错 iter 应当立刻报错,
+        ## 而不是在源 ckpt 目录下留一个空的 iter_XXXXXXX 再到读权重时才失败
+        if not os.path.isdir(directory):
+            raise FileNotFoundError(f"checkpoint iteration directory not found: {directory}")
 
         return directory
 
