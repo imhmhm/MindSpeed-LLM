@@ -8,8 +8,10 @@ cd $PROJECT_ROOT
 PATH_ROOT=/home/ma-user/work/dataset/huashan_zhh_guiyang_pfs
 # MODEL=Qwen3-0.6B
 # PROMPT_TYPE=qwen3
+# TOKENIZER_TAG=qwen3
 MODEL=ailab_slm_0_5b
 PROMPT_TYPE=ailab_slm
+TOKENIZER_TAG=ailab_slm
 SEQ_LEN=32768
 PACKING_METHOD=knapsack  ## knapsack / random
 #### processing in /cache is much faster
@@ -18,7 +20,7 @@ COPY_TO_CACHE=true
 # INPUT_SUBDIR=hf_data/MegaScience/data
 # INPUT_SUBDIR=hf_data/MegaScience/jsonl/MegaScience_nemotron_science.jsonl
 INPUT_SUBDIR=hf_data/MegaScience/data/*.parquet
-OUTPUT_SUBDIR_PREFIX=ml_data/ml_data__${MODEL}_${SEQ_LEN}_pack/MegaScience/MegaScience__${PACKING_METHOD}
+OUTPUT_SUBDIR_PREFIX=ml_data/ml_data__${TOKENIZER_TAG}_${SEQ_LEN}_pack/MegaScience/MegaScience__${PACKING_METHOD}
 
 ## ========  dataset attr ======== ##
 
