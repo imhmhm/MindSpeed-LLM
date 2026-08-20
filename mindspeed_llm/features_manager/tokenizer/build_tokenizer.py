@@ -15,7 +15,7 @@ PROMPT_TYPE_CHOICES = [
     'default', 'empty', 'trl', 'chatglm2', 'chatglm3', 'chatglm3_system', 'glm4', 'glm4_moe', 'chatml', 'bailing_mini',
     'chatml_de', 'qwen', 'qwen_r1', "qwen_math_r1", 'llama3', 'llama2', 'mistral', 'mixtral', 'gemma', 'alpaca',
     'deepseek2', 'deepseek2-lite', 'minicpm3', 'cpm', 'baichuan2', 'deepseek3', 'intern2', 'hunyuan', 'qwen3', 'magistral', 'plm', 'qwen_lf', 'gpt_oss', 
-    'ailab_slm',
+    'ailab_slm', 'ailab_slm_reasoning',
 ]
 
 
