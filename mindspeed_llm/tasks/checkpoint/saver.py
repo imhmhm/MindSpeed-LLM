@@ -16,6 +16,7 @@
 
 import logging as logger
 import os
+import re
 import sys
 
 import torch
@@ -69,6 +70,11 @@ def add_arguments(parser):
     group.add_argument("--noop-layers", type=str, default=None, help='Specity the noop layers.')
     group.add_argument('--load-hf-from-config', action='store_true', default=False,
                        help='If no weights file, use from_config to load the hf model')
+    ## zhh: 与 convert_ckpt_v2.py 的 --hf-cfg-dir 对齐 -- 独立指定 hf 配置目录, 不再要求
+    ## 预先把 config.json 放进 save-dir; 同时把配套的 tokenizer/config 文件拷到输出目录
+    group.add_argument('--hf-cfg-dir', type=str, default=None,
+                       help='Directory to load hugging face config files. Defaults to save-dir '
+                            '(mg2hf) or load-dir (hf2mg) when unset.')
 
 
 def update_padded_vocab_size(md, model_mg, orig_vocab_size):
@@ -558,8 +564,49 @@ def save_huggingface(args, model):
     model_hf.update_module(model)
 
     save_dir = os.path.join(args_cmd.save_dir, 'mg2hf')
+    ## zhh: 与 load 侧同一个 --ckpt-iter, 两端天然一致
+    ckpt_iter = getattr(args_cmd, 'ckpt_iter', None)
+    if ckpt_iter:
+        save_dir = os.path.join(save_dir, f"iter_{int(ckpt_iter):07d}")
     logger.info(f'save weight to {save_dir}')
     model_hf.get_model_item().save_pretrained(save_dir)
+    if args_cmd.hf_cfg_dir is not None:
+        copy_hf_cfg(args_cmd.hf_cfg_dir, save_dir)
+
+
+## zhh: 与 convert_ckpt_v2.py 的 Mg2HfConvert.copy_hf_cfg 保持一致的文件集合 --
+## save_pretrained 只写 config.json 和权重, tokenizer / 自定义建模代码要另行拷贝,
+## 否则产出目录不是一个可直接加载的 hf 模型
+_HF_CFG_FILE_PATTERN = re.compile(
+    r'^(?:'
+        r'.*\.json|'
+        r'.*\.model(?:\.[\w\d]+)?|'
+        r'.*\.jinja|'
+        r'merges\.txt|'
+        r'(?:modeling|configuration|tokenization)_[\w_]+\.py|'
+        r'sample_finetune\.py'
+    r')$'
+)
+
+
+def copy_hf_cfg(hf_cfg_dir, save_dir):
+    """Copy the huggingface config / tokenizer files next to the converted weights."""
+    if not os.path.isdir(hf_cfg_dir):
+        raise FileNotFoundError(f"Hugging Face directory not found: {hf_cfg_dir}")
+
+    os.makedirs(save_dir, exist_ok=True)
+
+    for filename in os.listdir(hf_cfg_dir):
+        if not _HF_CFG_FILE_PATTERN.match(filename):
+            continue
+        src_path = os.path.join(hf_cfg_dir, filename)
+        dst_path = os.path.join(save_dir, filename)
+        ## config.json 由 save_pretrained 按转换结果写出, 不能被参考模型的覆盖
+        if not os.path.isfile(src_path) or os.path.exists(dst_path):
+            continue
+        with open(src_path, 'rb') as fsrc, open(dst_path, 'wb') as fdst:
+            fdst.write(fsrc.read())
+        logger.info(f"Copied: {filename} from {src_path} to {dst_path}")
 
 
 def save_model_checkpoint(model_provider, queue, args):

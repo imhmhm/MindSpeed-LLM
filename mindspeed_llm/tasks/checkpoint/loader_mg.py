@@ -48,6 +48,12 @@ def add_arguments(parser):
                        help='Lora alpha.')
     group.add_argument('--moe-grouped-gemm', action='store_true',
                        help='Usr moe grouped gemm.')
+    ## zhh: 与 convert_ckpt_v2.py 的 --ckpt-iter 对齐: 选定源 iteration 并镜像到 save-dir,
+    ## 免去批量转换时反复改写 latest_checkpointed_iteration.txt
+    group.add_argument('--ckpt-iter', type=str, default=None,
+                       help='iteration to convert: selects load-dir/iter_XXXXXXX instead of reading '
+                            'latest_checkpointed_iteration.txt, and is mirrored as an iter_XXXXXXX '
+                            'subdir under the mg2hf save path')
     group.add_argument("--moe-tp-extend-ep", action='store_true',
                        help="use tp group to extend experts parallelism instead of sharding weight tensor of experts in tp group")
     group.add_argument('--load-from-legacy', action='store_true',
@@ -460,7 +466,13 @@ def _load_checkpoint(model_provider, queue, args):
     if args.use_mcore_models and args.load_from_legacy:
         args.use_mcore_models = False
 
-    args_hf = get_huggingface_model(args).get_args()
+    ## zhh: mg2mg 两端都是 mcore, 结构信息来自 ckpt 自身 (update_megatron_args_from_megatron_checkpoint),
+    ## 不需要 hf config -- HuggingfaceModel 在 save_model_type != 'hf' 时会去 load_dir 找 config.json,
+    ## 而 mcore ckpt 目录里没有这个文件. update_megatron_args_from_huggingface_config 支持 None
+    if args.save_model_type == 'mg':
+        args_hf = None
+    else:
+        args_hf = get_huggingface_model(args).get_args()
     model_mg = get_megatron_model(model_provider, args_cmd=args)
     model_mg.initialize_megatron_args(args_hf, queue=queue, loader_megatron=True)
 
