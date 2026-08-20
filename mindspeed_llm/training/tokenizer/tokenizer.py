@@ -29,8 +29,26 @@ import sentencepiece as spm
 import sentencepiece.sentencepiece_model_pb2 as model
 
 
+## zhh: tokenizer 改名前训练的 ckpt, 其 args 里仍是旧名. 实现未变, 仅名称不同, 所以归一化即可.
+## 与 features_manager/tokenizer/build_tokenizer.py 配套: 那边让旧名通过 --tokenizer-type 的
+## choices 校验, 这里把它换成新名再 dispatch, 否则下面的 elif 链会全部落空.
+## 放在 build_tokenizer 入口是因为它是所有路径 (训练 / v1 转换) 的必经之地
+_LEGACY_TOKENIZER_TYPES = {
+    'PanguSentencePieceTokenizer': 'AILabSentencePieceTokenizer',
+}
+
+
+def _resolve_legacy_tokenizer_type(args):
+    """Rewrite a renamed tokenizer type in place so older checkpoints stay loadable."""
+    resolved = _LEGACY_TOKENIZER_TYPES.get(getattr(args, 'tokenizer_type', None))
+    if resolved is not None:
+        print(f' > tokenizer type {args.tokenizer_type} was renamed to {resolved}', flush=True)
+        args.tokenizer_type = resolved
+
+
 def build_tokenizer(args):
     """Initialize tokenizer."""
+    _resolve_legacy_tokenizer_type(args)
     if args.tokenizer_type == "PretrainedFromHF":
         if args.rank == 0:
             print(' > building PretrainFromHF tokenizer. Vocab file is un-used, '
