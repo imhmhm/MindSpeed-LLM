@@ -1,0 +1,128 @@
+## ============ launch args for platform adaptor ============
+entry: posttrain_gpt.py
+model_name: Qwen3-0.6B
+load_name: ""
+load_iter: ""
+dataset_name: ""
+data_prefixes_and_weights: []
+tokenizer_tag: qwen3          ## selects ml_data__<tokenizer_tag>[_<seq-length>[_pack]]
+pretrain_data: false
+pack_varlen_data: false
+
+huashan_obs_mtp_task: ""
+huashan_obs_ml_data: ""
+
+mount_dataset_mtp_task: ""
+mount_dataset_ml_data: ""
+
+copy_data_to_cache: false
+
+sync_ckpt:
+  enable: true
+  interval: 60
+  # src: <defaults to save>
+  # dst: <defaults to computed obs save dir>
+
+mcore2hf_after_training:
+  iters: []
+
+## ============ mindspeed-llm training args ============
+## keys are the literal CLI flags (dashes); render emits `--<key>` with no translation.
+## ---- SFT / tune ----
+finetune: true
+stage: sft
+prompt-type: qwen3
+is-instruction-dataset: true
+
+## ---- data format ----
+## defaults are derived from `pretrain_data` and `pack_varlen_data` in launch.py and can be overridden by the CLI
+# neat-pack: false
+# reset-attention-mask: false
+# reset-position-ids: false
+# no-pad-to-seq-lengths: true
+
+
+## ---- optimizer ----
+optimizer: adam
+
+## ---- context parallel ----
+context-parallel-size: 1
+context-parallel-algo: ulysses_cp_algo
+attention-mask-type: causal
+transformer-impl: local
+
+## ---- parallelism ----
+tensor-model-parallel-size: 1
+sequence-parallel: true
+pipeline-model-parallel-size: 1
+
+## ---- tokenizer / mcore ----
+tokenizer-not-use-fast: true
+use-mcore-models: true
+tokenizer-type: PretrainedFromHF
+tokenizer-name-or-path: ""    ## computed by pre-tasks
+
+## ---- seq / batch ----
+seq-length: 32768
+max-position-embeddings: ${seq-length}
+micro-batch-size: 1
+global-batch-size: 128
+
+## ---- arch (Qwen3-0.6B) ----
+spec: ["mindspeed_llm.tasks.models.spec.qwen3_spec", "layer_spec"]
+group-query-attention: true
+num-query-groups: 8
+num-attention-heads: 16
+kv-channels: 128
+qk-layernorm: true
+num-layers: 28
+hidden-size: 1024
+ffn-hidden-size: 3072
+swiglu: true
+use-fused-swiglu: true
+disable-bias-linear: true
+position-embedding-type: rope
+use-rotary-position-embeddings: true
+rotary-base: 1000000
+normalization: RMSNorm
+norm-epsilon: "1e-06"
+use-fused-rmsnorm: true
+attention-dropout: 0.0
+hidden-dropout: 0.0
+make-vocab-size-divisible-by: 1
+padded-vocab-size: 151936
+
+## ---- train schedule ----
+train-iters: 8000
+lr: "1.25e-6"
+min-lr: "1.25e-7"
+lr-warmup-fraction: 0.01
+lr-decay-style: cosine
+init-method-std: 0.02
+use-flash-attn: true
+no-masked-softmax-fusion: true
+attention-softmax-in-fp32: true
+weight-decay: 0.0
+clip-grad: 1.0
+adam-beta1: 0.9
+adam-beta2: 0.95
+no-gradient-accumulation-fusion: true
+no-load-optim: true
+no-load-rng: true
+seed: 3668
+bf16: true
+
+## ---- data / output (paths computed by pre-tasks; empty here) ----
+data-path: []                 ## computed: get_data_path(...)
+split: "100,0,0"
+log-interval: 1
+save-interval: 400
+no-save-optim: true
+eval-interval: 8000
+eval-iters: 0
+log-timers-to-tensorboard: true
+tensorboard-dir: ""           ## computed by pre-tasks
+distributed-backend: nccl
+log-throughput: true
+load: ""                      ## computed by pre-tasks
+save: ""                      ## computed by pre-tasks
