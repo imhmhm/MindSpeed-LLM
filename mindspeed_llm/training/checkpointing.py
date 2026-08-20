@@ -170,7 +170,10 @@ def save_checkpoint_wrapper(fn):
             iteration, args.save, ckpt_format))
 
         # Collect rng state across data parallel ranks.
-        rng_state = get_rng_state(args.use_dist_ckpt)
+        ## zhh: no_save_rng 时不采集 -- generate_state_dict 本就会丢弃它, 而 get_rng_state
+        ## 读的是当前进程的 RNG (与源 ckpt 无关), 且 torch.cuda.get_rng_state() 无法在
+        ## fork 出来的子进程里初始化 NPU (ckpt 转换走 mp.Process 时会踩到)
+        rng_state = None if args.no_save_rng else get_rng_state(args.use_dist_ckpt)
 
         # Checkpoint name.
         checkpoint_name = get_checkpoint_name(args.save, iteration, release=False, pipeline_parallel=pipeline_parallel,
