@@ -165,5 +165,15 @@ preprocess_data/*
 !preprocess_data/preprocess_data_sft_pack.py
 !preprocess_data/preview_ml_data.ipynb
 !preprocess_data/utils.py
+
+# scripts/ckpt: track only the listed files, ignore everything else
+scripts/ckpt/*
+!scripts/ckpt/ckpt_convert_v1_ailab_slm_0_5b_mcore2hf.sh
+!scripts/ckpt/ckpt_convert_v1_ailab_slm_0_5b_mcore2mcore.sh
+!scripts/ckpt/ckpt_convert_v2_ailab_slm_0_5b_hf2mcore.sh
+!scripts/ckpt/ckpt_convert_v2_ailab_slm_0_5b_mcore2hf.sh
+!scripts/ckpt/ckpt_convert_v2_qwen3_0_6b_hf2mcore.sh
+!scripts/ckpt/ckpt_convert_v2_qwen3_0_6b_mcore2hf.sh
+
 # build artifact: compiled dataset helpers
 megatron/core/datasets/*.so
