@@ -7,13 +7,14 @@ cd $PROJECT_ROOT
 
 PATH_ROOT=/home/ma-user/work/dataset/huashan_zhh_guiyang_pfs
 # MODEL=Qwen3-0.6B
-# PROMPT_TYPE=qwen3
+# TOKENIZER_TAG=qwen3
 MODEL=ailab_slm_0_5b
+TOKENIZER_TAG=ailab_slm
 #### processing in /cache is much faster
 COPY_TO_CACHE=true
 
 INPUT_SUBDIR=corpus/encyclopedia_zh/wiki_ybk_dbk_others.jsonl
-OUTPUT_SUBDIR_PREFIX=ml_data/ml_data__${MODEL}/encyclopedia_zh/wiki_ybk_dbk_others/wiki_ybk_dbk_others
+OUTPUT_SUBDIR_PREFIX=ml_data/ml_data__${TOKENIZER_TAG}/encyclopedia_zh/wiki_ybk_dbk_others/wiki_ybk_dbk_others
 
 ## ======================================== ##
 
