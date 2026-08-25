@@ -19,6 +19,7 @@ STRUCTURAL_KEYS = {
     "tokenizer_tag",
     "huashan_obs_mtp_task", "huashan_obs_ml_data",
     "mount_dataset_mtp_task", "mount_dataset_ml_data",
+    "enable_tensorboard", "enable_swanlab",
 }
 
 
@@ -75,7 +76,7 @@ def pre_tasks(cfg):
         -> copy hf model tokenizer to cache
     - render `job_name` using time stamp
     - ckpt saving path
-    - tensorboard path
+    - tensorboard / swanlab paths
     """
     model_name = cfg.model_name
     load_name = cfg.get("load_name") or ""
@@ -215,8 +216,24 @@ def pre_tasks(cfg):
     cfg.save = ckpt_save_cache_dir
     ckpt_save_dst_dir = f"{mtp_task_dir_root}/ckpt/mcore/{job_name}"
 
-    if cfg.get("tensorboard-dir") in (None, ""):
-        cfg["tensorboard-dir"] = f"/cache/outputs/tensorboard/{job_name}"
+    ## tracker switches
+    if cfg.get("enable_tensorboard", True):
+        if cfg.get("tensorboard-dir") in (None, ""):
+            cfg["tensorboard-dir"] = f"/cache/outputs/tensorboard/{job_name}"
+    else:
+        cfg["tensorboard-dir"] = ""
+
+    if cfg.get("enable_swanlab", False):
+        if cfg.get("swanlab-project") in (None, ""):
+            cfg["swanlab-project"] = f"{job_name_prefix}__{model_name}__{load_name}"
+        if cfg.get("swanlab-exp-name") in (None, ""):
+            cfg["swanlab-exp-name"] = job_timestamp
+        if cfg.get("swanlab-save-dir") in (None, ""):
+            cfg["swanlab-save-dir"] = f"/cache/outputs/swanlab/{job_name}"
+    else:
+        cfg["swanlab-project"] = ""
+        cfg["swanlab-exp-name"] = ""
+        cfg["swanlab-mode"] = ""
 
     return ckpt_save_cache_dir, ckpt_save_dst_dir, job_name, mtp_task_dir_root
 

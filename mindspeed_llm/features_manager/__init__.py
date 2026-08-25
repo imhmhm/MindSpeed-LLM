@@ -74,6 +74,7 @@ from mindspeed_llm.features_manager.dpo.dpo import DPOFeature
 from mindspeed_llm.features_manager.pipeline_parallel.dualpipev_feature import DualpipeVFeature
 from mindspeed_llm.features_manager.pipeline_parallel.noop_layers import NoopLayersFeature
 from mindspeed_llm.features_manager.functional.profiling import ProfilingFeature
+from mindspeed_llm.features_manager.functional.swanlab import SwanLabFeature
 from mindspeed_llm.features_manager.tokenizer.build_tokenizer import BuildTokenizerFeature
 from mindspeed_llm.features_manager.transformer.flash_attention.fusion_attention_feature import FusionAttentionFeature
 from mindspeed_llm.features_manager.transformer.flash_attention.alibi_feature import AlibiFeature
@@ -262,6 +263,7 @@ def add_optimizer_features(features_list: List[MindSpeedFeature]):
 def add_functional_features(features_list: List[MindSpeedFeature]):
     features_list.extend([
         ProfilingFeature(),
+        SwanLabFeature(),
         NPUDeterministicFeature(),
         ProfilerDefaultFeature()
     ])
