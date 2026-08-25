@@ -255,6 +255,12 @@ class SyncCKPT:
         if os.path.exists(mtp_tb_dir):
             mox.file.copy_parallel(mtp_tb_dir, os.path.join(self.dst_path, 'tensorboard'))
 
+        ## copy swanlab to destination storage
+        ## path set by launch.py pre-tasks, kept beside tensorboard rather than under save
+        mtp_sl_dir = "/cache/outputs/swanlab"
+        if os.path.exists(mtp_sl_dir):
+            mox.file.copy_parallel(mtp_sl_dir, os.path.join(self.dst_path, 'swanlab'))
+
         ## copy ray logs to destination storage
         ray_log_dir = "/tmp/ray/session_latest/logs"
         if os.path.exists(ray_log_dir):
