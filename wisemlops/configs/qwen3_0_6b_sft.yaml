@@ -17,6 +17,9 @@ mount_dataset_ml_data: ""
 
 copy_data_to_cache: false
 
+enable_tensorboard: true
+enable_swanlab: false
+
 sync_ckpt:
   enable: true
   interval: 60
@@ -122,6 +125,10 @@ eval-interval: 8000
 eval-iters: 0
 log-timers-to-tensorboard: true
 tensorboard-dir: ""           ## computed by pre-tasks
+swanlab-project: ""           ## computed by pre-tasks
+swanlab-exp-name: ""          ## computed by pre-tasks
+swanlab-save-dir: ""          ## computed by pre-tasks
+swanlab-mode: ""              ## online | local | offline | disabled; defaults to offline
 distributed-backend: nccl
 log-throughput: true
 load: ""                      ## computed by pre-tasks

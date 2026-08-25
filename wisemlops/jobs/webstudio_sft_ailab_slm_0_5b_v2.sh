@@ -36,4 +36,7 @@ python wisemlops/launch.py \
     micro-batch-size=1 \
     global-batch-size=8 \
     sync_ckpt.enable=true \
+    enable_swanlab=true \
+    enable_tensorboard=false \
+    swanlab-mode="local" \
     mcore2hf_after_training.iters='[5,10]'
