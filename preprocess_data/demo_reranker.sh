@@ -1,0 +1,68 @@
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+PROJECT_ROOT=$(cd "$SCRIPT_DIR/.." && pwd -P)
+export PYTHONPATH=$PROJECT_ROOT:$PYTHONPATH
+cd $PROJECT_ROOT
+export TRANSFORMERS_VERBOSITY=error
+
+## ========  model/input/output  ======== ##
+
+PATH_ROOT=/home/ma-user/work/dataset/huashan_zhh_guiyang_pfs
+# MODEL=Qwen3-0.6B
+# PROMPT_TYPE=qwen3
+# TOKENIZER_TAG=qwen3
+MODEL=ailab_slm_0_5b
+PROMPT_TYPE=ailab_slm
+TOKENIZER_TAG=ailab_slm
+SEQ_LEN=4096
+#### processing in /cache is much faster
+COPY_TO_CACHE=true
+
+INPUT_SUBDIR=search/train_l2/train_filter_v5_v3_4_2.jsonl
+OUTPUT_SUBDIR_PREFIX=ml_data/ml_data__${TOKENIZER_TAG}_${SEQ_LEN}_reranker/train_l2/train_filter_v5_v3_4_2
+
+## ========  dataset attr ======== ##
+
+CONVERT_METHOD="reranker"
+MAP_KEYS='{"prompt":"messages", "positive":"positive_messages", "negative":"negative_messages", "system":""}'
+
+## ======================================== ##
+
+MODEL_DIR=${PATH_ROOT}/hf_model/${MODEL}
+
+INPUT_DIR=${PATH_ROOT}/${INPUT_SUBDIR}
+if [ "$COPY_TO_CACHE" = true ]; then
+    mkdir -p /cache/$(dirname "$INPUT_SUBDIR")
+    cp -r ${PATH_ROOT}/${INPUT_SUBDIR} /cache/$(dirname "$INPUT_SUBDIR")
+    INPUT_DIR=/cache/${INPUT_SUBDIR}
+fi
+
+OUTPUT_PREFIX=${PATH_ROOT}/${OUTPUT_SUBDIR_PREFIX}
+if [ "$COPY_TO_CACHE" = true ]; then
+    OUTPUT_PREFIX=/cache/${OUTPUT_SUBDIR_PREFIX}
+fi
+mkdir -p $(dirname "$OUTPUT_PREFIX")
+
+## ======================================== ##
+
+
+python preprocess_data/preprocess_data_reranker.py \
+  --input $INPUT_DIR \
+  --convert-method $CONVERT_METHOD \
+  --map-keys "$MAP_KEYS" \
+  --json-keys "input_ids" \
+  --tokenizer-name-or-path $MODEL_DIR \
+  --tokenizer-type PretrainedFromHF \
+  --prompt-type $PROMPT_TYPE \
+  --seq-length $SEQ_LEN \
+  --output-prefix $OUTPUT_PREFIX \
+  --clean-unmerged-indexed-dataset \
+  --workers 32
+  # --tokenizer-not-use-fast \
+
+## ======================================== ##
+
+if [ "$COPY_TO_CACHE" = true ]; then
+    DEST_OUTPUT_DIR=$(dirname "${PATH_ROOT}/${OUTPUT_SUBDIR_PREFIX}")
+    mkdir -p $DEST_OUTPUT_DIR
+    cp -r ${OUTPUT_PREFIX}*.* $DEST_OUTPUT_DIR
+fi

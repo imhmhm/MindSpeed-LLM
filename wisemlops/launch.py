@@ -122,6 +122,8 @@ def pre_tasks(cfg):
         data_dir_suffix += f"_{seq_len}"
         if pack_varlen:
             data_dir_suffix += "_pack"
+        if cfg.stage == "reranker":
+            data_dir_suffix += "_reranker"
 
     ml_data_dir = f"{ml_data_dir_root}/ml_data__{tokenizer_tag}{data_dir_suffix}"
     
