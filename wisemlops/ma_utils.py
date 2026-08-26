@@ -289,6 +289,25 @@ class SyncCKPT:
                 raise Exception(f"**** {dir_to_copy} can not be removed") from error
 
 
+DIR_TO_FILTER = re.compile(r'^[-_]?((tp|pp|ep)[-_]?\d+[-_]?)+$', re.IGNORECASE)
+
+def get_ckpt_tag(load_name):
+    """Shorten a `load_name` to the segment that identifies the checkpoint.
+
+    Walks the path right to left and returns the first segment that is not a
+    parallel-layout tag, so `Qwen3-0.6B-Base/tp1pp1` yields `Qwen3-0.6B-Base`
+    instead of `tp1pp1`.
+    """
+    segments = [seg for seg in load_name.split('/') if seg]
+    if not segments:
+        return ""
+    for segment in reversed(segments):
+        if not DIR_TO_FILTER.match(segment):
+            return segment
+    ## every segment is a layout tag; keep the last one rather than return empty
+    return segments[-1]
+
+
 def get_data_path(file_name_prefixes_and_weights, data_local_root, datasets):
     """
     [1]
