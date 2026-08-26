@@ -6,7 +6,7 @@ import subprocess
 
 from omegaconf import OmegaConf
 
-from ma_utils import (BarrierContextManager, copy_from_obs, _download_obs_ckpt_to_load, get_data_path, SyncCKPT, resolve_cluster)
+from ma_utils import (BarrierContextManager, copy_from_obs, _download_obs_ckpt_to_load, get_ckpt_tag, get_data_path, SyncCKPT, resolve_cluster)
 from task_ckpt_mcore2hf import run_mcore2hf
 import moxing as mox
 
@@ -211,7 +211,8 @@ def pre_tasks(cfg):
     timestamp_all = mox.file.glob(f"{flag_path}/[0-9][0-9][0-9]/*")
     job_timestamp = sorted(os.path.basename(t) for t in timestamp_all)[0]
     print(f"**** job_timestamp: {job_timestamp}", flush=True)
-    job_name = f"{job_name_prefix}_{job_timestamp}__{model_name}__{load_name}"
+    ckpt_tag = get_ckpt_tag(load_name)
+    job_name = f"{job_name_prefix}_{job_timestamp}__{model_name}__{ckpt_tag}"
     
     ckpt_save_cache_dir = f"/cache/outputs/ckpt/mcore/{job_name}"
     os.makedirs(ckpt_save_cache_dir, exist_ok=True)
@@ -227,7 +228,7 @@ def pre_tasks(cfg):
 
     if cfg.get("enable_swanlab", False):
         if cfg.get("swanlab-project") in (None, ""):
-            cfg["swanlab-project"] = f"{job_name_prefix}__{model_name}__{load_name}"
+            cfg["swanlab-project"] = f"{model_name}__{ckpt_tag}"[:100]  ## swanlab requirement
         if cfg.get("swanlab-exp-name") in (None, ""):
             cfg["swanlab-exp-name"] = job_timestamp
         if cfg.get("swanlab-save-dir") in (None, ""):
