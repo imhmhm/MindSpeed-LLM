@@ -51,6 +51,9 @@ class InstructionDatasetAttr:
     """ columns for the pairwise dataset """
     chosen: Optional[str] = "chosen"
     rejected: Optional[str] = "rejected"
+    """ columns for the reranker dataset """
+    positive: Optional[str] = "positive_messages"
+    negative: Optional[str] = "negative_messages"
     """ tags for the sharegpt format """
     role_tag: Optional[str] = "from"
     content_tag: Optional[str] = "value"
@@ -215,11 +218,68 @@ def _convert_alpaca_to_intermediate(sample: Dict[str, List[Any]], dataset_attr: 
     return outputs
 
 
+def _reranker_doc_text(group) -> str:
+    """ 
+    group: [{"role": "assistant", "content": "正/负文档"}]
+    return 正/负文档
+    (implement fallback and redundancy handling)
+    """
+    if isinstance(group, dict):
+        group = [group]
+    if not isinstance(group, list) or not group:
+        return ""
+    for message in reversed(group):
+        if isinstance(message, dict) and message.get('content') is not None:
+            return message['content']
+    return ""
+
+
+def convert_reranker_to_intermediate(sample: Dict[str, Union[List[Any], Dict]],
+                                      dataset_attr: "InstructionDatasetAttr"):
+    """
+    generative reranker 组结构数据(ms-swift reranker 插件格式)
+    e.g.
+    {
+        "channel": "default",
+        "messages": [
+            {"role": "user", "content": "查询指令...{doc_message}..."}
+        ],
+        "system": "可选 system",
+        "positive_messages": [
+            [{"role": "assistant", "content": "正文档"}]
+        ],
+        "negative_messages": [
+            [{"role": "assistant", "content": "负文档"}],
+            [...],
+        ]
+    }
+    """
+    outputs = {"prompt": [], "response": [], "system": [], "tools": [],
+               "positive": [], "negative": []}
+
+    messages = sample.get(dataset_attr.messages) if dataset_attr.messages else None
+    if isinstance(messages, list) and messages:
+        outputs["prompt"] = messages[:1]  # query 模板消息(含文档占位符)
+    outputs["positive"] = [
+        text for text in (_reranker_doc_text(g) for g in (sample.get(dataset_attr.positive) or []))
+        if text]
+    outputs["negative"] = [
+        text for text in (_reranker_doc_text(g) for g in (sample.get(dataset_attr.negative) or []))
+        if text]
+    system = sample.get(dataset_attr.system) if dataset_attr.system else None
+    if isinstance(system, list):
+        system = system[0] if system else ""
+    outputs["system"].append(system if isinstance(system, str) else "")
+    outputs["tools"].append("")
+    return outputs
+
+
 DATASET_CONVERT_METHODS = {
     "dapo_math_17k": convert_dapo_math_17k_to_intermediate,
     "dapo_math_17k_processed": convert_dapo_math_17k_processed_to_intermediate,
     "alpaca": convert_alpaca_to_intermediate,
     "sharegpt": convert_sharegpt_to_intermediate,
+    "reranker": convert_reranker_to_intermediate,
     ##
     "vehicle_labeled_action": convert_vehicle_labeled_action_to_intermediate,
     "vehicle_labeled_ori": convert_vehicle_labeled_ori_to_intermediate,
