@@ -177,3 +177,6 @@ scripts/ckpt/*
 
 # build artifact: compiled dataset helpers
 megatron/core/datasets/*.so
+
+# dev-only docs/tests, not for the repo
+dev/

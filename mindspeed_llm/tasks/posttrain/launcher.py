@@ -5,6 +5,7 @@ from megatron.training import get_args
 from megatron.training.initialize import initialize_megatron
 from mindspeed_llm.tasks.posttrain.sft import SFTTrainer
 from mindspeed_llm.tasks.posttrain.dpo import DPOTrainer
+from mindspeed_llm.tasks.posttrain.gen_reranker import RerankerTrainer
 from mindspeed_llm.tasks.posttrain.ldt_sft.ldt_sft_trainer import LDTSFTTrainer
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,8 @@ def get_trainer(stage):
             return SFTTrainer()
     elif stage == "dpo":
         return DPOTrainer()
+    elif stage == "reranker":
+        return RerankerTrainer()
     else:
         logger.info(f'Unknown Stage: {stage}')
         return None
