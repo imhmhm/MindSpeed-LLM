@@ -18,7 +18,6 @@ import os
 import numpy as np
 import torch
 
-from megatron.core import mpu
 from megatron.core.datasets import indexed_dataset
 from megatron.training import get_args, get_tokenizer, print_rank_0
 
@@ -87,7 +86,8 @@ def build_reranker_dataset(data_prefix, splits_string, seq_length, train_valid_t
     """Provider entry: build train/valid/test RerankerDataset from the single stream.
 
     split 用 seeded permutation 按 splits_string 权重切分, 所有 rank 上确定一致;
-    不做 epoch 重复/配额(组数即样本数)。
+    各 split 的组索引再按 train_valid_test_num_samples 需求量做 epoch 重复补满
+    (对齐 mcore GPTDataset 的 index 语义, 见下方注释)。
     """
     args = get_args()
     if len(data_prefix) == 1:
@@ -145,26 +145,38 @@ def build_reranker_dataset(data_prefix, splits_string, seq_length, train_valid_t
     rng = np.random.RandomState(seed)
     perm = rng.permutation(total_groups)
 
-    def _wrap(indices):
-        return RerankerDataset(group_indices=[int(i) for i in indices], ids_ds=ids_ds)
+    # epoch 填充(对齐 mcore GPTDataset 的 index 语义): megatron 训练循环按
+    # train_iters x gbs 拉取, single 型迭代器不会回绕, 各 split 必须供满需求量,
+    # 否则数据不足时恰在 epoch 边界 StopIteration。train 段逐 epoch 重洗牌,
+    # valid/test 按切分顺序原样重复(全量评估, 顺序无关)。
+    # train_valid_test_num_samples 口径即 get_train_valid_test_num_samples:
+    # train = train_iters x gbs; valid = 全程累计 eval 消耗; test = 单次 eval 消耗。
+    def _fill_epochs(indices, num_samples, shuffle):
+        filled = [int(i) for i in indices]
+        epochs = 1
+        while len(filled) < num_samples and len(indices) > 0:
+            epoch = indices.copy()
+            if shuffle:
+                rng.shuffle(epoch)
+            filled.extend(int(i) for i in epoch)
+            epochs += 1
+        return filled, epochs
+
+    def _wrap(indices, num_samples, name):
+        if len(indices) == 0:
+            return None
+        filled, epochs = _fill_epochs(indices, num_samples, shuffle=(name == 'train'))
+        if epochs > 1:
+            print_rank_0(f' > reranker {name}: repeated {len(indices)} groups x {epochs} '
+                         f'epochs to meet the {num_samples}-sample demand')
+        return RerankerDataset(group_indices=filled, ids_ds=ids_ds)
 
     splits = (
-        _wrap(perm[:n_train]) if n_train > 0 else None,
-        _wrap(perm[n_train:n_train + n_valid]) if n_valid > 0 else None,
-        _wrap(perm[n_train + n_valid:]) if n_test > 0 else None,
+        _wrap(perm[:n_train], train_valid_test_num_samples[0], 'train'),
+        _wrap(perm[n_train:n_train + n_valid], train_valid_test_num_samples[1], 'valid'),
+        _wrap(perm[n_train + n_valid:], train_valid_test_num_samples[2], 'test'),
     )
     print_rank_0(f' > reranker split: train={n_train}, valid={n_valid}, test={n_test} groups')
-    # 防呆: single 型 eval dataloader 拉干即 StopIteration, 需求量必须 <= 对应 split 组数
-    dp_world = mpu.get_data_parallel_world_size()
-    num_microbatches = max(1, args.global_batch_size // (args.micro_batch_size * dp_world))
-    eval_demand = (getattr(args, 'eval_iters', 0) or 0) * num_microbatches \
-        * args.micro_batch_size * dp_world
-    for name, n_groups in (('valid', n_valid), ('test', n_test)):
-        if n_groups and eval_demand > n_groups:
-            print_rank_0(f' > WARNING: {name} groups ({n_groups}) < eval demand ({eval_demand} = '
-                         f'eval-iters x num_microbatches x micro-batch-size x DP); '
-                         f'eval WILL hit StopIteration. Widen the --split fraction or '
-                         f'lower --eval-iters.')
     return splits
 
 
