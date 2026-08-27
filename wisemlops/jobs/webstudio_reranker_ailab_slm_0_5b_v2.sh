@@ -22,7 +22,7 @@ python wisemlops/launch.py \
     mount_dataset_ml_data=$MTP_DATASET_HOME/ml_data \
     dataset_name=train_l2 \
     data_prefixes_and_weights="['train_filter_v5_v3_4_2']" \
-    pack_varlen_data=false \
+    is_pack_varlen_data=false \
     load_name=slm_archv2_muon_pretrain_8t_v12_lr5e3_muon_cooldown_mtp01_v6v4_320b \
     load_iter=80000 \
     lr=2e-6 \

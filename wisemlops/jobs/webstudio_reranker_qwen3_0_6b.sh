@@ -22,7 +22,7 @@ python wisemlops/launch.py \
     mount_dataset_ml_data=$MTP_DATASET_HOME/ml_data \
     dataset_name=train_l2 \
     data_prefixes_and_weights="['train_filter_v5_v3_4_2']" \
-    pack_varlen_data=false \
+    is_pack_varlen_data=false \
     load_name=Qwen3-0.6B-Base/tp1pp1 \
     load_iter=1 \
     lr=2e-6 \
