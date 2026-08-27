@@ -446,6 +446,11 @@ def _build_index_mappings(
     # Filename of the index mappings.
     _filename = data_prefix
     _filename += '_{}_indexmap'.format(name)
+    ## zhh: the document range belongs in the fingerprint -- the same (prefix, name,
+    ## num_samples) can cover different ranges depending on --split (or on
+    ## blend_per_split, where a phase owns the whole stream), and without it a stale
+    ## cache is silently reused with the wrong document ids
+    _filename += '_{}-{}docs'.format(start_index, start_index + nb_documents)
     _filename += '_{}ns'.format(num_samples)
     _filename += '_{}s'.format(seed)
     _filename += '_{}'.format("padded_samples") if args.padded_samples else ""
