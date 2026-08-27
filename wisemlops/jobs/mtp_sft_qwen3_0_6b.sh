@@ -14,7 +14,7 @@ export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
 
 ## 50M/100M to avoid the number of partitions exceeding the OBS limit, default 10M. (50M: 52428800, 100M: 104857600)
 export MOX_FILE_LARGE_FILE_PART_SIZE=104857600
-export USE_OBS=0
+# export USE_OBS=0
 HUASHAN_OBS_MTP_TASK="xxx"
 MTP_DATASET_HOME="/opt/huawei/dataset/data_sfs"
 
