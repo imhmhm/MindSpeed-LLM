@@ -280,16 +280,18 @@ def main():
 
     mcore2hf = cfg.get("mcore2hf_after_training")
     if mcore2hf is not None and (iters := mcore2hf.get("iters")):
-        if OmegaConf.is_config(iters):
-            iters = OmegaConf.to_object(iters)
-        iters = list(iters) if isinstance(iters, (list, tuple)) else [iters]
-        run_mcore2hf(
-            task_names=[job_name],
-            iters=[iters],
-            model=cfg.model_name,
-            task_dir_root=task_root,
-            use_obs=bool(int(os.getenv("USE_OBS", 0))),
-        )
+        node_rank = int(os.environ["NODE_RANK"])
+        if node_rank == 0:
+            if OmegaConf.is_config(iters):
+                iters = OmegaConf.to_object(iters)
+            iters = list(iters) if isinstance(iters, (list, tuple)) else [iters]
+            run_mcore2hf(
+                task_names=[job_name],
+                iters=[iters],
+                model=cfg.model_name,
+                task_dir_root=task_root,
+                use_obs=bool(int(os.getenv("USE_OBS", 0))),
+            )
 
 
 if __name__ == "__main__":
