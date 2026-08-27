@@ -308,6 +308,71 @@ def get_ckpt_tag(load_name):
     return segments[-1]
 
 
+## megatron takes one data source per run: a single --data-path blend carved up by
+## --split, or independent --train/valid/test-data-path streams (blend_per_split,
+## where --split does not apply). See megatron/core/datasets/
+## blended_megatron_dataset_config.py __post_init__.
+SPLIT_NAMES = ("train", "valid", "test")
+
+
+def resolve_data_source(cfg, data_cache_dir_root):
+    """Render --data-path or the per-split --{train,valid,test}-data-path.
+
+    Returns the copy plan as [(dataset_name, file_name_prefixes), ...]; every
+    entry still has to be fetched into the cache. Sets the unused mode's keys to
+    "" rather than leaving them as [], which render_args would emit as a bare
+    flag that megatron then fails to unpack.
+    """
+    dataset_name = cfg.get("dataset_name") or ""
+    prefixes_and_weights = list(cfg.get("data_prefixes_and_weights", []) or [])
+    per_split = {
+        name: (cfg.get(f"{name}_dataset_name") or "",
+               list(cfg.get(f"{name}_data_prefixes_and_weights", []) or []))
+        for name in SPLIT_NAMES
+    }
+
+    has_single = bool(dataset_name or prefixes_and_weights)
+    has_per_split = any(ds or pw for ds, pw in per_split.values())
+    if has_single and has_per_split:
+        raise ValueError(
+            "`dataset_name` / `data_prefixes_and_weights` are mutually exclusive with their "
+            "`{train,valid,test}_` counterparts (megatron takes one data source per run)")
+    if not has_single and not has_per_split:
+        raise ValueError(
+            "no data source: provide `dataset_name` / `data_prefixes_and_weights`, "
+            "or their `{train,valid,test}_` counterparts")
+
+    if has_single:
+        ## `dataset_name` alone means the prefix repeats the directory name
+        if not prefixes_and_weights:
+            prefixes_and_weights = [dataset_name]
+        _, path_and_weights, file_name_prefixes = get_data_path(
+            prefixes_and_weights, data_cache_dir_root, dataset_name)
+        cfg["data-path"] = path_and_weights
+        for name in SPLIT_NAMES:
+            cfg[f"{name}-data-path"] = ""
+        return [(dataset_name, file_name_prefixes)]
+
+    data_copy_plan = []
+    for name in SPLIT_NAMES:
+        split_dataset_name, split_prefixes = per_split[name]
+        if not split_dataset_name and not split_prefixes:
+            ## megatron logs "blend not provided for <split>" and skips the phase
+            cfg[f"{name}-data-path"] = ""
+            continue
+        if not split_prefixes:
+            split_prefixes = [split_dataset_name]
+        _, path_and_weights, file_name_prefixes = get_data_path(
+            split_prefixes, data_cache_dir_root, split_dataset_name)
+        cfg[f"{name}-data-path"] = path_and_weights
+        data_copy_plan.append((split_dataset_name, file_name_prefixes))
+    cfg["data-path"] = ""
+    if cfg.get("split"):
+        print(f"**** per-split data paths given, dropping split={cfg['split']!r}", flush=True)
+    cfg["split"] = ""
+    return data_copy_plan
+
+    
 def get_data_path(file_name_prefixes_and_weights, data_local_root, datasets):
     """
     [1]

@@ -22,7 +22,7 @@ python wisemlops/launch.py \
     mount_dataset_ml_data=$MTP_DATASET_HOME/ml_data \
     dataset_name=MegaScience \
     data_prefixes_and_weights='["MegaScience"]' \
-    pack_varlen_data=false \
+    is_pack_varlen_data=false \
     load_name=Qwen3-0.6B-Base/tp1pp1 \
     load_iter=1 \
     lr=1e-5 \

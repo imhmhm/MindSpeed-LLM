@@ -6,8 +6,8 @@ load_iter: ""
 dataset_name: ""
 data_prefixes_and_weights: []
 tokenizer_tag: ailab_slm      ## selects ml_data__<tokenizer_tag>[_<seq-length>[_pack]]
-pretrain_data: false
-pack_varlen_data: false
+is_pretrain_data: false
+is_pack_varlen_data: false
 
 huashan_obs_mtp_task: ""
 huashan_obs_ml_data: ""
@@ -38,7 +38,7 @@ prompt-type: ailab_slm
 is-instruction-dataset: true
 
 ## ---- data format ----
-## defaults are derived from `pretrain_data` and `pack_varlen_data` in launch.py and can be overridden by the CLI
+## defaults are derived from `is_pretrain_data` and `is_pack_varlen_data` in launch.py and can be overridden by the CLI
 # neat-pack: false
 # reset-attention-mask: false
 # reset-position-ids: false

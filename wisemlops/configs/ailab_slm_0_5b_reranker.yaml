@@ -6,8 +6,8 @@ load_iter: ""
 dataset_name: ""
 data_prefixes_and_weights: []
 tokenizer_tag: ailab_slm    ## selects ml_data__<tokenizer_tag>[_<seq-length>[_reranker]]
-pretrain_data: false
-pack_varlen_data: false
+is_pretrain_data: false
+is_pack_varlen_data: false
 
 huashan_obs_mtp_task: ""
 huashan_obs_ml_data: ""
