@@ -42,3 +42,7 @@ class RerankerFeature(MindSpeedFeature):
                            help='Score token treated as the negative label. Must match '
                                 'preprocess_data_reranker.py --negative-token. Env '
                                 'GENERATIVE_RERANKER_NEGATIVE_TOKEN overrides (ms-swift compat).')
+        group.add_argument('--eval-on-start', action='store_true', default=False,
+                           help='Evaluate on the validation set once before training '
+                                'starts (= ms-swift --eval_on_start true); useful as the '
+                                'baseline of a finetuned starting checkpoint.')

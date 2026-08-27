@@ -15,11 +15,15 @@ token id 各归属一个 TP rank。每个 rank 只对自己持有的行做 matmu
 
 SP 处理: 参照 orm_model, 先 gather_from_sequence_parallel_region 再取行。
 
+CP 处理: head 是逐位置 matmul, 与序列分片无关, 模型侧无需感知; 序列分片下
+每行最后一个有效位置只落在持它的 CP rank 上, trainer 侧 masked-sum 后对
+CP 组 all_reduce 还原(见 loss_func)。
+
 checkpoint 兼容: 无新参数, sharded_state_dict 沿用 GPTModel 原生实现,
 存/读与普通 SFT ckpt 完全一致(全 vocab output_layer 照常保存)。
 """
 import os
-from typing import Callable, Literal, Optional
+from typing import Literal, Optional
 from unittest.mock import patch
 
 import torch

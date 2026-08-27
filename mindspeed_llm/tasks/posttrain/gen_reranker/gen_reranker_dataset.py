@@ -203,6 +203,11 @@ def build_reranker_dataset(data_prefix, splits_string, seq_length, train_valid_t
     各 split 的组索引均按 train_valid_test_num_samples 需求量做 epoch 重复补满。
     """
     args = get_args()
+    # --eval-on-start 会在训练前额外消耗一个 eval pass 的 valid 样本
+    # (valid 迭代器是累计消费的), 需求量同步加上, 否则最后一次 eval 拉干
+    if getattr(args, 'eval_on_start', False):
+        train_valid_test_num_samples = list(train_valid_test_num_samples)
+        train_valid_test_num_samples[1] += args.eval_iters * args.global_batch_size
     per_split_paths = (getattr(args, 'train_data_path', None),
                        getattr(args, 'valid_data_path', None),
                        getattr(args, 'test_data_path', None))

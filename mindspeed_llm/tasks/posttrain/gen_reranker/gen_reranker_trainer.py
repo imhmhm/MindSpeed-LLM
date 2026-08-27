@@ -8,13 +8,14 @@
   - loss 只取每条序列最后一个有效位置: score = logit(yes) - logit(no);
   - 逐组 softmax cross-entropy, 目标类别 = 0(正样本位置), 对组取平均
     (ms-swift ListwiseRerankerLoss 的逐组循环在此精确移植);
-  - 指标: 组内 argmax 命中正样本的比例(listwise acc)。
+  - 指标: 组内 argmax 命中正样本的比例(listwise acc), 跨 DP + 跨 micro-batch
+    的样本等权全局平均(pointwise 为逐序列二分类 acc)。
   
   - 变长组下 batch 行数逐 micro-batch 浮动, 与 PP 的固定通信 shape 不兼容,
-    pipeline_model_parallel_size > 1 时显式报错(单机 TP/DP 场景不受影响)。
+    pipeline_model_parallel_size > 1 时显式报错; TP/DP/CP 不受影响
+    (CP 沿序列维切分, 与 batch 行数浮动无关)。
 
 """
-import os
 from functools import partial
 
 import torch
@@ -26,6 +27,7 @@ from megatron.training.utils import (
     get_batch_on_this_cp_rank,
     average_losses_across_data_parallel_group,
 )
+from megatron.training.training import evaluate_and_print_results
 from megatron.training.arguments import core_transformer_config_from_args
 from megatron.training.yaml_arguments import core_transformer_config_from_yaml
 from megatron.core.transformer.spec_utils import import_module
@@ -48,6 +50,22 @@ class RerankerTrainer(BaseTrainer):
                 'variable group size is incompatible with the fixed PP communication shape; '
                 'use TP/DP only (pipeline-model-parallel-size=1)')
         super().__init__()
+
+    def train(self):
+        # --eval-on-start: 训练前先跑一轮 valid eval 作为起点 ckpt 的基线
+        # (= ms-swift --eval_on_start true); dataset 侧已同步给 valid 流的
+        # epoch 填充需求量加上这一 pass, 不会挤占训练中的 eval
+        args = get_args()
+        if (getattr(args, 'eval_on_start', False) and args.do_valid
+                and args.do_train and not args.skip_train):
+            (forward_step_func, model, _, _, _, valid_data_iterator,
+             process_non_loss_data_func, config) = self.train_args
+            evaluate_and_print_results(
+                f'iteration {args.iteration} (pre-train) on validation set',
+                forward_step_func, valid_data_iterator, model, args.iteration,
+                process_non_loss_data_func, config,
+                verbose=True, write_to_tensorboard=True)
+        super().train()
 
 
     @staticmethod
@@ -141,24 +159,30 @@ class RerankerTrainer(BaseTrainer):
             labels[starts.long()] = 1
             loss = F.binary_cross_entropy_with_logits(scores, labels)
             with torch.no_grad():
-                acc = ((scores > 0) == labels.bool()).float().mean()
+                # acc 口径: 命中序列数 / 序列总数(序列等权)
+                hits = ((scores > 0) == labels.bool()).float().sum()
+                count = float(scores.numel())
         else:
             # 逐组 listwise CE(变长组), ms-swift ListwiseRerankerLoss 的精确移植
             group_losses = []
-            acc_hits = []
+            hits = 0.0
             start = 0
             for k in group_sizes.tolist():
                 group_scores = scores[start:start + k] / temperature
                 target = torch.zeros(1, dtype=torch.long, device=group_scores.device)
                 group_losses.append(F.cross_entropy(group_scores.unsqueeze(0), target))
                 with torch.no_grad():
-                    acc_hits.append(float(group_scores.argmax().item() == 0))
+                    hits += float(group_scores.argmax().item() == 0)
                 start += k
             loss = torch.stack(group_losses).mean()
-            acc = torch.tensor(sum(acc_hits) / len(acc_hits), device=scores.device)
+            count = float(len(group_losses))  # acc: 命中组数 / 组总数(组等权)
 
         averaged_loss = average_losses_across_data_parallel_group([loss])
-        return loss, {'reranker loss': averaged_loss[0], 'reranker acc': acc}
+        acc_stat = torch.tensor([float(hits), count], dtype=torch.float,
+                                device=scores.device)
+        torch.distributed.all_reduce(acc_stat, group=mpu.get_data_parallel_group())
+        return loss, {'reranker loss': averaged_loss[0],
+                      'reranker acc': (acc_stat[0], acc_stat[1])}
 
 
     def forward_step(self, data_iterator, model):
