@@ -47,7 +47,7 @@ python wisemlops/launch.py \
     mount_dataset_ml_data=$MTP_DATASET_HOME/ml_data \
     dataset_name=rerank_filter_v5 \
     data_prefixes_and_weights='["rerank_v5"]' \
-    pack_varlen_data=false \
+    is_pack_varlen_data=false \
     load_name=<converted_mcore_ckpt_name> \
     load_iter=1 \
     lr=2e-6 \

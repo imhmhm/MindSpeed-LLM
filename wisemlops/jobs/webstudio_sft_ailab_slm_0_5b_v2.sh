@@ -22,7 +22,7 @@ python wisemlops/launch.py \
     mount_dataset_ml_data=$MTP_DATASET_HOME/ml_data \
     dataset_name=MegaScience \
     data_prefixes_and_weights="[0.5, 'MegaScience__knapsack', 0.3, 'MegaScience__random',]" \
-    pack_varlen_data=true \
+    is_pack_varlen_data=true \
     load_name=slm_archv2_muon_pretrain_8t_v12_lr5e3_muon_cooldown_mtp01_v6v4_320b \
     load_iter=80000 \
     lr=1e-4 \
