@@ -81,6 +81,31 @@ def _get_num_documents(data_prefix):
     return len(list(packed_indexed_dataset.values())[0])
 
 
+def _resolve_paths(data_prefix):
+    """Normalize a --*-data-path value into (paths, weights)."""
+    if len(data_prefix) == 1:
+        data_prefix = data_prefix[0].split(',')
+    return get_blend_from_list(data_prefix)
+
+
+def _get_field_set(data_prefix):
+    """Union of the packed field names (input_ids, labels, ...) behind one blend."""
+    paths, _ = _resolve_paths(data_prefix)
+    fields = set()
+    for path in paths:
+        packed_indexed_dataset = get_packed_indexed_dataset(data_prefix=path)
+        if not packed_indexed_dataset:
+            raise ValueError(f'no packed indexed dataset found for prefix {path}')
+        fields.update(packed_indexed_dataset.keys())
+    return fields
+
+
+## one-hot --split per phase: get_train_valid_test_split_ then hands every document of
+## the stream to that phase and leaves the other two empty, which is what blend_per_split
+## means -- a stream belongs entirely to its split
+_ONE_HOT_SPLITS = ('1,0,0', '0,1,0', '0,0,1')
+
+
 def build_blended_mtf_dataset(
     data_prefix,
     splits_string,
@@ -88,7 +113,61 @@ def build_blended_mtf_dataset(
     train_valid_test_num_samples,
     seed,
 ):
-    """Build blended train, valid and test instruction datasets.
+    """Build train, valid and test instruction datasets from one or three data sources.
+
+    Two mutually exclusive modes, mirroring megatron blend vs blend_per_split (the
+    mutual exclusion is already enforced by GPTDatasetConfig.__post_init__, which runs
+    before this provider):
+    - Mode A: --data-path, one blend carved into three phases by --split;
+    - Mode B: --train/valid/test-data-path, each an independent blend owned entirely by
+      its phase; --split does not apply and an omitted phase yields None.
+    """
+    args = get_args()
+    per_split_paths = (args.train_data_path, args.valid_data_path, args.test_data_path)
+    if any(paths is not None for paths in per_split_paths):
+        return _build_per_split_blends(per_split_paths, seq_length,
+                                       train_valid_test_num_samples, seed)
+    return _build_blend(data_prefix, splits_string, seq_length,
+                        train_valid_test_num_samples, seed)
+
+
+def _build_per_split_blends(per_split_paths, seq_length, train_valid_test_num_samples, seed):
+    """Mode B: build each phase from its own blend, keeping the other two empty."""
+    ## resolve every stream before building anything: the streams are preprocessed
+    ## independently, so a missing prefix or a field one of them lacks would otherwise
+    ## surface far away (an IndexError while indexing, a KeyError in the collator)
+    field_sets = {
+        _SPLIT_NAMES[index]: _get_field_set(paths)
+        for index, paths in enumerate(per_split_paths) if paths is not None
+    }
+    if len({frozenset(fields) for fields in field_sets.values()}) > 1:
+        raise ValueError(
+            f'per-split streams carry different packed fields: '
+            f'{ {name: sorted(fields) for name, fields in field_sets.items()} }. '
+            f'Re-run preprocess_data.py with the same --prompt-type / handler for every split')
+
+    datasets = []
+    for index, paths in enumerate(per_split_paths):
+        if paths is None:
+            datasets.append(None)
+            continue
+        ## only this phase asks for samples; the other two carve zero documents anyway
+        sizes = [0, 0, 0]
+        sizes[index] = train_valid_test_num_samples[index]
+        splits = _build_blend(paths, _ONE_HOT_SPLITS[index], seq_length, sizes, seed)
+        datasets.append(splits[index])
+
+    return tuple(datasets)
+
+
+def _build_blend(
+    data_prefix,
+    splits_string,
+    seq_length: int,
+    train_valid_test_num_samples,
+    seed,
+):
+    """Build blended train, valid and test instruction datasets from one data source.
 
     Sampling volume is decided here (each sub dataset is built with its own quota) and
     realized by DecoderPackedMTFDataset, which repeats or truncates its document epochs to
@@ -96,10 +175,7 @@ def build_blended_mtf_dataset(
     """
     args = get_args()
 
-    if len(data_prefix) == 1:
-        data_prefix = data_prefix[0].split(',')
-
-    paths, weights = get_blend_from_list(data_prefix)
+    paths, weights = _resolve_paths(data_prefix)
 
     ## 单数据集且未指定权重时直接走原有单集路径, 索引缓存与行为完全不变
     if len(paths) == 1 and weights is None:
