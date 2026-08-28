@@ -54,7 +54,9 @@ class RerankerTrainer(BaseTrainer):
     def train(self):
         # --eval-on-start: 训练前先跑一轮 valid eval 作为起点 ckpt 的基线
         # (= ms-swift --eval_on_start true); dataset 侧已同步给 valid 流的
-        # epoch 填充需求量加上这一 pass, 不会挤占训练中的 eval
+        # epoch 填充需求量加上这一 pass, 不会挤占训练中的 eval。每轮评估
+        # (含这次 pre-eval 和训练中的 valid) 后的缓存释放在 megatron
+        # evaluate() 末尾统一处理(对所有 stage 生效)
         args = get_args()
         if (getattr(args, 'eval_on_start', False) and args.do_valid
                 and args.do_train and not args.skip_train):
