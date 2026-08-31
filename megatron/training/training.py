@@ -2299,10 +2299,14 @@ def evaluate_and_print_results(prefix, forward_step_func,
                                   iteration)
                 writer.add_scalar('{} validation ppl vs samples'.format(key),
                                   ppl, args.consumed_train_samples)
-            if wandb_writer and is_last_rank():
-                wandb_writer.log({
-                    '{} validation'.format(key): total_loss_dict[key].item()},
-                    iteration)
+        ## zhh: 原本嵌在 `if writer:` 里, 关掉 tensorboard 会连带丢掉 wandb/swanlab 的
+        ## 全部 validation 指标. 与 training_log 里同样的问题, 这里也提到同级各自判空.
+        if wandb_writer and is_last_rank():
+            wandb_writer.log({
+                '{} validation'.format(key): total_loss_dict[key].item()},
+                iteration)
+            if args.log_validation_ppl_to_tensorboard:
+                wandb_writer.log({'{} validation ppl'.format(key): ppl}, iteration)
 
     if process_non_loss_data_func is not None and writer and is_last_rank():
         process_non_loss_data_func(collected_non_loss_data, iteration, writer)
