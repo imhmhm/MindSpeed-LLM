@@ -832,12 +832,12 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
     one_logger_utils.track_e2e_metrics()
 
     # Flush TensorBoard and WandB writers.
+    ## zhh: finish() 移到 base_trainer.train() 的最后, 这里只 flush;
+    ## 否则训练后的 do_valid / do_test 打点时 Run 已关闭, swanlab 会
+    ## RuntimeError("run.log() requires an active Run")
     writer = get_tensorboard_writer()
     if writer:
         writer.flush()
-    wandb_writer = get_wandb_writer()
-    if wandb_writer:
-        wandb_writer.finish()
 
     # Close out pre-hooks if using distributed optimizer and overlapped param gather.
     if pre_hook_enabled:
