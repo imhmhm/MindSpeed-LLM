@@ -12,6 +12,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.executors.pool import ProcessPoolExecutor
 
 import moxing as mox
+import torch
 
 
 def get_npus_per_node():
@@ -313,6 +314,55 @@ def get_ckpt_tag(load_name):
 ## where --split does not apply). See megatron/core/datasets/
 ## blended_megatron_dataset_config.py __post_init__.
 SPLIT_NAMES = ("train", "valid", "test")
+
+
+def read_rotary_base_from_ckpt(ckpt_load_dir, load_iter):
+    """Read rotary_base from a megatron checkpoint without loading tensor data.
+
+    Opens the checkpoint zip, reads only the pickle metadata (args, iteration, …),
+    and returns the rotary_base stored in checkpoint_args, or None if absent or
+    if the checkpoint path does not exist. Overhead is ~0.35s regardless of shard
+    size because tensor storage entries and megatron class imports are skipped.
+    """
+    import io
+    import pickle
+    import zipfile
+
+    iter_dir = os.path.join(ckpt_load_dir, f"iter_{int(load_iter):07d}")
+    pt_path = next(iter(sorted(glob.glob(os.path.join(
+        iter_dir, "mp_rank_00*", "model_optim_rng.pt")))), None)
+    if not pt_path:
+        return None
+
+    try:
+        with zipfile.ZipFile(pt_path) as zf:
+            pkl_name = next((n for n in zf.namelist() if n.endswith("data.pkl")), None)
+            if pkl_name is None:
+                return None
+            pkl_bytes = zf.read(pkl_name)
+
+        class _FastUnpickler(pickle.Unpickler):
+            """Skip tensor data and stub any class not already imported."""
+
+            def persistent_load(self, pid):
+                ## tensor storage reference -- zero-length stub; the data bytes
+                ## are never touched, and the dtype is irrelevant
+                return torch.FloatStorage(0)
+
+            def find_class(self, module, name):
+                ## avoid importing heavy modules (megatron, mindspeed, torch.nn, …).
+                ## the stub must be a real type: pickle may reach it via NEWOBJ,
+                ## which rejects functions ("class argument must be a type")
+                try:
+                    return super().find_class(module, name)
+                except (ImportError, AttributeError):
+                    return type(name, (), {"__init__": lambda self, *a, **kw: None})
+
+        sd = _FastUnpickler(io.BytesIO(pkl_bytes)).load()
+        return getattr(sd.get("args"), "rotary_base", None)
+    except Exception as exc:
+        print(f"**** read_rotary_base_from_ckpt: {exc}", flush=True)
+        return None
 
 
 def resolve_data_source(cfg, data_cache_dir_root):

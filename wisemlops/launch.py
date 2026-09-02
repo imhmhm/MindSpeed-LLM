@@ -8,7 +8,7 @@ from omegaconf import OmegaConf
 
 from ma_utils import (BarrierContextManager, copy_from_obs, _download_obs_ckpt_to_load,
                       resolve_data_source, get_ckpt_tag, SyncCKPT, resolve_cluster,
-                      SPLIT_NAMES)
+                      SPLIT_NAMES, read_rotary_base_from_ckpt)
 from task_ckpt_mcore2hf import run_mcore2hf
 import moxing as mox
 
@@ -73,20 +73,23 @@ def validate(cfg):
         raise ValueError(f"launch.py: missing required args after pre-tasks: {missing}")
 
 
-def pre_tasks(cfg):
+def pre_tasks(cfg, rest=None):
     """
     - determine huanshan(obs) or mount dataset
     - render `--data-path` (or `train/valid/test-data-path`, megatron style)
-    - sync the following tasks across all nodes within `BarrierContextManager` 
-        -> 910c rerank node (optional)  
+    - sync the following tasks across all nodes within `BarrierContextManager`
+        -> 910c rerank node (optional)
         -> copy code to cache (optional)
         -> copy data to cache (optional)
-        -> copy loading ckpt to cache 
+        -> copy loading ckpt to cache
         -> copy hf model tokenizer to cache
     - render `job_name` using time stamp
     - ckpt saving path
     - tensorboard / swanlab paths
     """
+    rotary_base_from_shell = any(
+        arg.startswith("rotary-base=") for arg in (rest or [])
+    )
     model_name = cfg.model_name
     load_name = cfg.get("load_name") or ""
     load_iter = cfg.get("load_iter") or ""
@@ -209,6 +212,21 @@ def pre_tasks(cfg):
             with open(f"{cfg.load}/latest_checkpointed_iteration.txt", "w") as f:
                 f.write(str(load_iter))
 
+            ## shell > ckpt > yaml: if rotary-base was not passed on the CLI,
+            ## read it from the checkpoint args (only the pkl header, ~0.35s)
+            ## so the user doesn't have to remember to update the shell script
+            ## when continuing from a ckpt trained with a different rope base.
+            if not rotary_base_from_shell:
+                ckpt_rotary_base = read_rotary_base_from_ckpt(cfg.load, load_iter)
+                if ckpt_rotary_base is not None:
+                    cfg["rotary-base"] = ckpt_rotary_base
+                    print(f"**** rotary-base: {ckpt_rotary_base} (from ckpt)", flush=True)
+                else:
+                    print(f"**** rotary-base: {cfg.get('rotary-base')} (from yaml, ckpt had none)",
+                          flush=True)
+            else:
+                print(f"**** rotary-base: {cfg.get('rotary-base')} (from shell)", flush=True)
+
         ## copy hf_model tokenizer to cache
         tokenizer_cache_dir = f"/cache/inputs/hf_model/{model_name}"
         mox.file.copy_parallel(f"{mtp_task_dir_root}/hf_model/{model_name}", tokenizer_cache_dir)
@@ -254,8 +272,8 @@ def main():
     opts, rest = parser.parse_known_args()
 
     cfg = OmegaConf.merge(OmegaConf.load(opts.config), OmegaConf.from_cli(rest))
-                   
-    save_cache, save_dst, job_name, task_root = pre_tasks(cfg)
+
+    save_cache, save_dst, job_name, task_root = pre_tasks(cfg, rest)
     validate(cfg)
     cmd = ["torchrun", *build_torchrun_launcher(),
            cfg.entry, *render_args(cfg)]
