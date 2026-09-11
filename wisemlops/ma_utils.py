@@ -423,6 +423,38 @@ def resolve_data_source(cfg, data_cache_dir_root):
     return data_copy_plan
 
     
+def _parse_weights(file_name_prefixes_and_weights):
+    """与 megatron `get_blend_from_list` 同构的权重判定:
+
+    奇数个 -> 无权重(全是前缀); 偶数个且偶数位全为数字 -> 带权重;
+    偶数位全非数字 -> 无权重; 混合 -> 报错(全有或全无)。
+    用 float() 而非 isinstance, 顺带接受字符串数字 '0.3'(与下游 float(rwpd) 口径一致)。
+    """
+    items = file_name_prefixes_and_weights
+    if len(items) % 2 == 1:
+        try:
+            float(items[0])
+        except (TypeError, ValueError):
+            return None
+        raise ValueError(
+            "data_prefixes_and_weights looks like weight/prefix pairs but has an odd "
+            "length; either give a weight for every dataset "
+            "```[0.3, 'data1', 0.4, 'data2']``` or none ```['data1', 'data2']```")
+
+    weights = []
+    for item in items[0::2]:
+        try:
+            weights.append(float(item))
+        except (TypeError, ValueError):
+            weights.append(None)
+    if all(weight is None for weight in weights):
+        return None
+    if any(weight is None for weight in weights):
+        raise ValueError("data_prefixes_and_weights mixes weights and plain prefixes; "
+                         "either give a weight for every dataset or none of them")
+    return weights
+
+
 def get_data_path(file_name_prefixes_and_weights, data_local_root, datasets):
     """
     [1]
@@ -443,6 +475,16 @@ def get_data_path(file_name_prefixes_and_weights, data_local_root, datasets):
         ## shell=False
         file_name_path_and_weights: ['0.3', f'{data_local_root}/{datasets}/data1', '0.4', f'{data_local_root}/{datasets}/data2', ...]
         file_name_prefixes: ['data1', 'data2', ...]
+    [3] names only (no weights): downstream infers weights from the dataset lengths
+        (SFT: packed document counts; pretrain: split-carved dataset sizes)
+    args
+        file_name_prefixes_and_weights: ['data1', 'data2', ...]
+    return
+        ## shell=True
+        data_path_str_megatron: f"{data_local_root}/{datasets}/data1 {data_local_root}/{datasets}/data2 ..."
+        ## shell=False
+        file_name_path_and_weights: [f'{data_local_root}/{datasets}/data1', f'{data_local_root}/{datasets}/data2', ...]
+        file_name_prefixes: ['data1', 'data2', ...]
     """
     file_name_prefixes = []
     file_name_path_and_weights = []
@@ -453,23 +495,27 @@ def get_data_path(file_name_prefixes_and_weights, data_local_root, datasets):
             os.path.join(data_local_root, datasets, file_name_prefixes_and_weights[0].strip())
         )
     else:
-        if len(file_name_prefixes_and_weights) % 2 != 0:
-            raise Exception("data files more than one should be in the form of"
-                            " weights and files: ```[0.3, 'data1', 0.4, 'data2', ...]```")
-        num_datasets = len(file_name_prefixes_and_weights) // 2
-        for i in range(num_datasets):
-            _weight = file_name_prefixes_and_weights[2 * i]
-            _prefix = file_name_prefixes_and_weights[2 * i + 1].strip()
-            if not (isinstance(_weight, int) or isinstance(_weight, float)):
-                raise Exception("weight should be int or float")
-            file_name_prefixes.append(_prefix)
-            file_name_path_and_weights.append(
-                str(_weight)
-            )  # append weight
-            file_name_path_and_weights.append(
-                ## f"{data_local_root}/{datasets}/{_prefix}"
-                os.path.join(data_local_root, datasets, _prefix)
-            )  # append path
+        weights = _parse_weights(file_name_prefixes_and_weights)
+        if weights is None:
+            ## zhh: names-only, 与 megatron get_blend_from_list 的隐式权重语义对齐
+            for _prefix in file_name_prefixes_and_weights:
+                _prefix = str(_prefix).strip()
+                file_name_prefixes.append(_prefix)
+                file_name_path_and_weights.append(
+                    ## f"{data_local_root}/{datasets}/{_prefix}"
+                    os.path.join(data_local_root, datasets, _prefix)
+                )
+        else:
+            for _weight, _prefix in zip(weights, file_name_prefixes_and_weights[1::2]):
+                _prefix = _prefix.strip()
+                file_name_prefixes.append(_prefix)
+                file_name_path_and_weights.append(
+                    str(_weight)
+                )  # append weight
+                file_name_path_and_weights.append(
+                    ## f"{data_local_root}/{datasets}/{_prefix}"
+                    os.path.join(data_local_root, datasets, _prefix)
+                )  # append path
 
     data_path_str_megatron = " ".join(file_name_path_and_weights)
     return data_path_str_megatron, file_name_path_and_weights, file_name_prefixes
