@@ -21,7 +21,7 @@ from megatron.training import get_args
 from megatron.training.tokenizer import build_tokenizer as megatron_build_tokenizer
 from megatron.training.tokenizer.tokenizer import _vocab_size_with_padding
 from megatron.core.datasets.megatron_tokenizer import MegatronTokenizer
-from mindspeed_llm.tasks.preprocess.templates import fix_model_tokenizer
+from mindspeed_llm.tasks.preprocess.data_format_llamafactory import fix_model_tokenizer
 from mindspeed_llm.training.tokenizer.magistral_tokenizer import create_magistral_tokenizer
 
 
