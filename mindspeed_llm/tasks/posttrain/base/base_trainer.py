@@ -4,7 +4,7 @@ import time
 from abc import ABC, abstractmethod
 import torch
 import megatron
-from megatron.training import get_args, print_rank_0, get_timers
+from megatron.training import get_args, print_rank_0, get_timers, get_wandb_writer
 from megatron.training.training import (
     print_datetime,
     get_one_logger,
@@ -229,3 +229,7 @@ class BaseTrainer(ABC):
                                        test_data_iterator, model,
                                        iteration, process_non_loss_data_func, config,
                                        verbose=True, write_to_tensorboard=not args.skip_train)
+
+        wandb_writer = get_wandb_writer()
+        if wandb_writer:
+            wandb_writer.finish()
