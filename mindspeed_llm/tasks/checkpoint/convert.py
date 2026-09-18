@@ -1,10 +1,13 @@
 #  Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
 import abc
+import glob
 import logging as logger
 import os
 from collections import defaultdict
 import numpy as np
 import torch
+from safetensors import safe_open
+from safetensors.torch import save_file
 from .model_builder import MegatronModel, HuggingFaceModel
 
 
@@ -39,6 +42,27 @@ class Convert(abc.ABC):
 
         self.num_layers = args.num_layers
         self.first_k_dense_replace = args.first_k_dense_replace
+        ## zhh: [mg2hf] getattr: training-side save (from_train=True) passes training args without this flag
+        self.merge_layers_safetensors = getattr(args, 'merge_layers_safetensors', False)
+
+    @staticmethod
+    def merge_safetensors(input_dir, output_path):
+        """
+        [mg2hf]
+        merge the saved safetensors of each layer to a whole `model.safetensors`
+        """
+        merged_state_dict = {}
+
+        glob_pattern = "model-[0-9]*-of-[0-9]*.safetensors"
+        safetensor_list = glob.glob(os.path.join(input_dir, glob_pattern))
+        for filepath in sorted(safetensor_list):
+            print(f"load: {filepath}")
+            with safe_open(filepath, framework="pt", device="cpu") as f:
+                for key in f.keys():
+                    merged_state_dict[key] = f.get_tensor(key)
+
+        print(f"save: {output_path}")
+        save_file(merged_state_dict, output_path)
 
 
     @staticmethod
