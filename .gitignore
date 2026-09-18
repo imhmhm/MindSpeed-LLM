@@ -143,12 +143,6 @@ cython_debug/
 # pycharm stuff
 .idea
 
-# megatron core
-/megatron/
-
-# mindspeed
-/mindspeed/
-
 # User stuff
 /kernel*/
 /logs/
