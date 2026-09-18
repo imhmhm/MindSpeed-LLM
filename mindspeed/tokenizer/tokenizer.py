@@ -46,7 +46,7 @@ def build_tokenizer_wrapper(build_tokenizer):
                 args.tokenizer_name_or_path,
                 vocab_extra_ids=args.vocab_extra_ids,
                 model_max_length=args.seq_length,
-                use_fast=args.tokenizer_not_use_fast,
+                use_fast=args.tokenizer_use_fast,
                 **hf_tokenizer_kwargs
             )
 
