@@ -2244,6 +2244,12 @@ def evaluate(forward_step_func,
     for model_module in model:
         model_module.train()
 
+    ## zhh: release the cached allocator blocks left by the eval pass: the eval
+    ## zhh: allocation pattern differs from training steps and its residue can push
+    ## zhh: later training steps (notably the first one) over the memory limit on
+    ## zhh: near-capacity runs
+    torch.cuda.empty_cache()
+
     for key in total_loss_dict:
         numerator, denominator = total_loss_dict[key]
         total_loss_dict[key] = numerator / denominator
