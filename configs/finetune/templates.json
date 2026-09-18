@@ -871,5 +871,71 @@
     "efficient_eos": false,
     "replace_eos": false,
     "template_class": "DeepSeek4Template"
+  },
+  {
+    "name": "ailab_slm",
+    "format_user": {
+      "slots": [
+        "[extra_id_254]user\n{{content}}[extra_id_255]\n[extra_id_254]assistant\n"
+      ]
+    },
+    "format_assistant": {
+      "slots": [
+        "{{content}}[extra_id_255]\n"
+      ]
+    },
+    "format_system": {
+      "slots": [
+        "[extra_id_254]system\n{{content}}[extra_id_255]\n"
+      ]
+    },
+    "format_tools": {
+      "tool_format": "ailab_slm"
+    },
+    "format_observation": {
+      "tool_format": "ailab_slm"
+    },
+    "default_system": "You are a helpful assistant.",
+    "stop_words": [
+      "[extra_id_255]"
+    ],
+    "replace_eos": false,
+    "efficient_eos": false
+  },
+  {
+    "name": "ailab_slm_reasoning",
+    "format_user": {
+      "slots": [
+        "[extra_id_254]user\n{{content}}[extra_id_255]\n[extra_id_254]assistant\n"
+      ]
+    },
+    "format_assistant": {
+      "slots": [
+        "{{content}}[extra_id_255]\n"
+      ]
+    },
+    "format_system": {
+      "slots": [
+        "[extra_id_254]system\n{{content}}[extra_id_255]\n"
+      ]
+    },
+    "format_tools": {
+      "tool_format": "ailab_slm"
+    },
+    "format_observation": {
+      "tool_format": "ailab_slm"
+    },
+    "default_system": "You are a helpful assistant.",
+    "stop_words": [
+      "[extra_id_255]"
+    ],
+    "replace_eos": false,
+    "efficient_eos": false,
+    "thought_words": [
+      "<think>\n",
+      "\n</think>\n\n"
+    ],
+    "enable_thinking": true,
+    "template_class": "ReasoningTemplate"
   }
 ]
