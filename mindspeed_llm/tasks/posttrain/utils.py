@@ -65,6 +65,14 @@ def train_valid_test_datasets_provider(train_val_test_num_samples):
             train_valid_test_num_samples=train_val_test_num_samples,
             seq_length=args.seq_length,
             seed=args.seed)
+    elif getattr(args, 'stage', None) == 'reranker':
+        from mindspeed_llm.tasks.posttrain.gen_reranker.gen_reranker_dataset import build_reranker_dataset
+        train_ds, valid_ds, test_ds = build_reranker_dataset(
+            data_prefix=args.data_path,
+            splits_string=args.split,
+            seq_length=args.seq_length,
+            train_valid_test_num_samples=train_val_test_num_samples,
+            seed=args.seed)
     else:
         train_ds, valid_ds, test_ds = BlendedMegatronDatasetBuilder(
             dataset_type,

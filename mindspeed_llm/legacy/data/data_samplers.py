@@ -63,6 +63,9 @@ def build_pretraining_data_loader(dataset, consumed_samples):
             return_tensors='pt',
             padding=True
         )
+    elif getattr(args, 'stage', None) == 'reranker':
+        from mindspeed_llm.tasks.posttrain.gen_reranker.gen_reranker_dataset import build_reranker_collator
+        collator = build_reranker_collator()
     elif args.is_instruction_dataset:
         tokenizer.padding_side = args.tokenizer_padding_side
         collator = DataCollatorForSeq2Seq(
