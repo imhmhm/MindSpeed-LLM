@@ -149,6 +149,34 @@ cython_debug/
 /model_from_hf/
 /model_weights/
 
-# codearts
-.arts
-.codeartsdoer
+# preprocess_data: track only the listed files, ignore everything else
+preprocess_data/*
+!preprocess_data/__init__.py
+!preprocess_data/base.py
+!preprocess_data/convert_methods.py
+!preprocess_data/convert_methods_vehicle.py
+!preprocess_data/demo_pretrain.sh
+!preprocess_data/demo_rl.sh
+!preprocess_data/demo_sft_no_pack.sh
+!preprocess_data/demo_sft_pack.sh
+!preprocess_data/preprocess_data_pretrain.py
+!preprocess_data/preprocess_data_rl.py
+!preprocess_data/preprocess_data_sft_no_pack.py
+!preprocess_data/preprocess_data_sft_pack.py
+!preprocess_data/preview_ml_data.ipynb
+!preprocess_data/utils.py
+
+# scripts/ckpt: track only the listed files, ignore everything else
+scripts/ckpt/*
+!scripts/ckpt/ckpt_convert_v1_ailab_slm_0_5b_mcore2hf.sh
+!scripts/ckpt/ckpt_convert_v1_ailab_slm_0_5b_mcore2mcore.sh
+!scripts/ckpt/ckpt_convert_v2_ailab_slm_0_5b_hf2mcore.sh
+!scripts/ckpt/ckpt_convert_v2_ailab_slm_0_5b_mcore2hf.sh
+!scripts/ckpt/ckpt_convert_v2_qwen3_0_6b_hf2mcore.sh
+!scripts/ckpt/ckpt_convert_v2_qwen3_0_6b_mcore2hf.sh
+
+# build artifact: compiled dataset helpers
+megatron/core/datasets/*.so
+
+# dev-only docs/tests, not for the repo
+dev/
