@@ -280,7 +280,8 @@ class GPTModel(MegatronCoreGPTModel):
             hidden_states = hidden_states[-100:]
 
         if args.loss_compute_mode == "chunk" and args.tensor_model_parallel_size == 1 and args.context_parallel_size == 1:
-            labels = F.pad(labels, (0, 1), value=-100)
+            # zhh: labels are pre-shifted (pad+index) upstream (SFT trainer / pretraining
+            # dataset roll); no pad and no per-chunk shift here.
             shift_labels = labels
             # Create a mask to identify valid tokens (typically > -1 means non-special tokens)
             loss_mask = shift_labels > -1
@@ -320,9 +321,10 @@ class GPTModel(MegatronCoreGPTModel):
             if labels is None:
                 # [s b h] => [b s h]
                 return logits.transpose(0, 1).contiguous()
-            if args.is_instruction_dataset:
-                labels = labels[:, 1:].contiguous()
-                logits = logits[:-1, :, :].contiguous()
+            # zhh: labels are pre-shifted (pad+index) upstream; no slicing here.
+            # if args.is_instruction_dataset:
+            #     labels = labels[:, 1:].contiguous()
+            #     logits = logits[:-1, :, :].contiguous()
             loss = self.compute_language_model_loss(labels, logits)
         return loss
 
