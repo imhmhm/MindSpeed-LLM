@@ -461,13 +461,21 @@ class HuggingfaceModel(ModelBase):
         self.initialize_args()
         self.layers_self_attention_linear_qkv_caches = {"layer_idx": -1, "weight": None, "bias": None}
 
+    def get_hf_cfg_dir(self):
+        """Directory holding the reference huggingface config/model.
+
+        --hf-cfg-dir wins; otherwise fall back to the original implicit convention.
+        """
+        hf_cfg_dir = getattr(self.args_cmd, 'hf_cfg_dir', None)
+        if hf_cfg_dir:
+            return hf_cfg_dir
+        if self.args_cmd.save_model_type == 'hf':
+            return self.args_cmd.save_dir
+        return self.args_cmd.load_dir
+
     def initialize_args(self):
         # Read huggingface args.
-        if self.args_cmd.save_model_type == 'hf':
-            cfg_dir = self.args_cmd.save_dir
-        else:
-            cfg_dir = self.args_cmd.load_dir
-        llama_args_path = os.path.join(cfg_dir, "config.json")
+        llama_args_path = os.path.join(self.get_hf_cfg_dir(), "config.json")
         with open(llama_args_path) as f:
             self.args = json.load(f)
 
@@ -507,10 +515,7 @@ class HuggingfaceModel(ModelBase):
 
     def get_modules_from_config(self, device_map="cpu", trust_remote_code=True):
         # Load Huggingface model.
-        if self.args_cmd.save_model_type == "hf":
-            load_dir = self.args_cmd.save_dir
-        else:
-            load_dir = self.args_cmd.load_dir
+        load_dir = self.get_hf_cfg_dir()
         config = AutoConfig.from_pretrained(load_dir, trust_remote_code=trust_remote_code)
         with torch.device("meta"):
             hf_model = AutoModelForCausalLM.from_config(config, trust_remote_code=trust_remote_code)
@@ -521,10 +526,7 @@ class HuggingfaceModel(ModelBase):
 
     def get_modules_from_pretrained(self, device_map="cpu", trust_remote_code=True):
         # Load Huggingface model.
-        if self.args_cmd.save_model_type == "hf":
-            load_dir = self.args_cmd.save_dir
-        else:
-            load_dir = self.args_cmd.load_dir
+        load_dir = self.get_hf_cfg_dir()
 
         self.module = [AutoModelForCausalLM.from_pretrained(
             load_dir, device_map=device_map, trust_remote_code=trust_remote_code, local_files_only=True
@@ -964,6 +966,13 @@ class MegatronModel(ModelBase):
         sys.argv = self.get_sys_argv()
         self.args = parse_args()
 
+        ## zhh: 必须在 update_megatron_args_from_megatron_checkpoint 之前设置 --
+        ## megatron _load_base_checkpoint 用 args.ckpt_step 覆盖 tracker 文件里的 iteration,
+        ## 透传即可选定源 iteration, 无需改写 latest_checkpointed_iteration.txt
+        ckpt_iter = getattr(self.args_cmd, 'ckpt_iter', None)
+        if ckpt_iter:
+            self.args.ckpt_step = int(ckpt_iter)
+
         self.update_megatron_args_from_megatron_checkpoint(loader_megatron)
         self.update_megatron_args_from_cmd_config(loader_megatron)
         self.update_megatron_args_from_huggingface_config(hf_args)
@@ -1057,7 +1066,11 @@ class MegatronModel(ModelBase):
             self.args.llama = hf_args
             self.args.ffn_hidden_size = hf_args.intermediate_size
             self.args.gradient_accumulation_fusion = hf_args.gradient_accumulation_fusion
-            self.args.kv_channels = hf_args.kv_channels if hasattr(hf_args, "kv_channels") else None
+            ## zhh: 参考模型的 config 没有 kv_channels 时保留 load_args_from_checkpoint 从 ckpt
+            ## 读到的值 -- 原来无条件赋 None 会回落到 hidden_size // num_attention_heads,
+            ## head_dim 与之不等的模型 (如 head_dim=128, hidden/heads=64) 会重建出错误的 attention 维度
+            if hasattr(hf_args, "kv_channels"):
+                self.args.kv_channels = hf_args.kv_channels
             self.args.num_experts = getattr(hf_args, "num_experts", None)
             self.args.n_shared_experts = getattr(hf_args, "n_shared_experts", None)
             self.args.shared_expert_gate = getattr(hf_args, "shared_expert_gate", None)
