@@ -5,6 +5,7 @@ from typing import Union
 
 import megatron
 import torch
+import torch.nn.functional as F
 from megatron.core import mpu, parallel_state, tensor_parallel
 from megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_layer_local_spec,
@@ -103,6 +104,10 @@ class SFTTrainer(BaseTrainer):
         data_b = tensor_parallel.broadcast_data(keys, next(data_iterator), data_type)
         # Unpack
         labels = data_b.get('labels').long()
+        # zhh: shift labels for next-token alignment via pad+index (replaces torch.roll).
+        # Last position becomes -100 so loss_mask always masks the wrap-around. Done before
+        # loss_mask derivation and before CP sharding so the shift is global (CP-safe).
+        labels = F.pad(labels, (0, 1), value=IGNORE_INDEX)[:, 1:]
         tokens = data_b.get('input_ids').long()
         attention_mask_1d = data_b.get('attention_mask').long()
         # ignored label -100
@@ -187,7 +192,8 @@ class SFTTrainer(BaseTrainer):
         loss_mask = input_tensor
 
         losses = output_tensor.float()
-        loss_mask = loss_mask[..., 1:].view(-1).float()
+        # zhh: labels are pre-shifted (pad+index) in get_batch; loss_mask is already aligned.
+        loss_mask = loss_mask.view(-1).float()
         if args.context_parallel_size > 1:
             loss = torch.cat([torch.sum(losses.view(-1) * loss_mask).view(1), loss_mask.sum().view(1)])
             torch.distributed.all_reduce(loss, group=mpu.get_context_parallel_group())
