@@ -12,7 +12,7 @@ from megatron.core.datasets.blended_megatron_dataset_builder import BlendedMegat
 from megatron.core.datasets.gpt_dataset import GPTDatasetConfig
 from megatron.core.datasets.gpt_dataset import MockGPTDataset, GPTDataset
 from megatron.core.datasets.utils import get_blend_from_list
-from mindspeed_llm.tasks.preprocess.decoder_packed_mtf_dataset import build_train_valid_test_datasets as build_instruction_dataset
+from mindspeed_llm.tasks.preprocess.blended_mtf_dataset import build_blended_mtf_dataset as build_instruction_dataset
 
 
 def is_dataset_built_on_rank():
