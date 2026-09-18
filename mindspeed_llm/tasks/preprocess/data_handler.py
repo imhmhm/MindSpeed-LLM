@@ -29,7 +29,7 @@ from datasets import load_dataset
 
 from megatron.core.datasets import indexed_dataset
 
-from mindspeed_llm.tasks.preprocess.templates import Prompter, AlpacaTemplate, get_model_template
+from mindspeed_llm.tasks.preprocess.data_format_llamafactory import get_model_template
 from mindspeed_llm.tasks.posttrain.utils import convert_token_to_id
 from .decoder_packed_mtf_dataset import _infer_seqlen
 
@@ -44,6 +44,41 @@ from .utils import (
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+class AlpacaTemplate:
+    system_token = ""
+    user_token = "### Instruction:"
+    assistant_token = "### Response:"
+    end_token = ""
+    system = (
+        "Below is an instruction that describes a task, paired with an input that provides further context. "
+        "Write a response that appropriately completes the request. "
+        "Please note that you need to think through your response logically and step by step."
+    )
+
+
+class Prompter:
+    r"""Wrap a template (e.g. AlpacaTemplate) and render messages into a training prompt.
+
+    MindSpeed-LLM-specific helper kept local to data_handler (its only caller); not part of the
+    LF-extracted formatting layer.
+    """
+
+    def __init__(self, template, verbose: bool = False):
+        self._verbose = verbose
+        self.template = template
+        self.user_role = "user"
+        self.assistant_role = "assistant"
+
+    def generate_training_prompt(self, messages) -> str:
+        prompt = self.template.system_token + "\n" + self.template.system + self.template.end_token + "\n"
+        for message in messages:
+            if message["role"] == self.user_role:
+                prompt += self.template.user_token + "\n" + message["content"] + self.template.end_token + "\n"
+            else:
+                prompt += self.template.assistant_token + "\n" + message["content"] + self.template.end_token + "\n"
+        return prompt
 
 
 class BaseDatasetHandler(object):
