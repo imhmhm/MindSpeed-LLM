@@ -129,6 +129,12 @@ def get_args():
     parser.add_argument('--lora-alpha', type=int, default=None, help='Lora alpha.')
     parser.add_argument('--lora-target-modules', nargs='+', type=str, default=[], help='Lora target modules.')
     parser.add_argument('--save-lora-to-hf', action='store_true', help='only save lora ckpt to hf.')
+    parser.add_argument('--merge-layers-safetensors', action='store_true',
+                        help='merge the saved safetensors of each layer to a whole `model.safetensors`.')
+    parser.add_argument('--ckpt-iter', type=str, default=None,
+                        help='iteration to convert (mg2hf batch convert): selects load-dir/iter_XXXXXXX '
+                             'instead of reading latest_checkpointed_iteration.txt, and is mirrored as '
+                             'an iter_XXXXXXX subdir under save-dir')
     args, unknown = parser.parse_known_args()
     if unknown:
         raise ValueError(f"Unrecognized argument : {' '.join(unknown)}")
