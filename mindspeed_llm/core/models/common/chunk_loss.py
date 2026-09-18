@@ -209,8 +209,7 @@ def calculate_lm_loss(
     """
     args = get_args()
     if args.is_instruction_dataset:
-        shift_labels = shift_labels[:, 1:].contiguous()
-
+        # zhh: labels are pre-shifted (pad+index) upstream; no per-chunk shift.
         # Flatten labels to 1D: (batch_size * seq_len,)
         shift_labels = shift_labels.reshape(-1)
 
@@ -218,7 +217,6 @@ def calculate_lm_loss(
         # Cast to float to ensure numerical stability in loss computation
         logits = F.linear(hidden_states, head_weight).float()
 
-        logits = logits[:, :-1, :].contiguous()
         logits = logits.reshape(-1, logits.size(-1))
     else:
         # Flatten labels to 1D: (batch_size * seq_len,)
