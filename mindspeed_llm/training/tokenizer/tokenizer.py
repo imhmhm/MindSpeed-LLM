@@ -32,7 +32,7 @@ import sentencepiece.sentencepiece_model_pb2 as model
 ## zhh: tokenizer 改名前训练的 ckpt, 其 args 里仍是旧名. 实现未变, 仅名称不同, 所以归一化即可.
 ## 与 features_manager/tokenizer/build_tokenizer.py 配套: 那边让旧名通过 --tokenizer-type 的
 ## choices 校验, 这里把它换成新名再 dispatch, 否则下面的 elif 链会全部落空.
-## 放在 build_tokenizer 入口是因为它是所有路径 (训练 / 预处理 / v1 转换) 的必经之地
+## 放在 build_tokenizer 入口是因为它是所有路径 (训练 / v1 转换) 的必经之地
 _LEGACY_TOKENIZER_TYPES = {
     'PanguSentencePieceTokenizer': 'AILabSentencePieceTokenizer',
 }
