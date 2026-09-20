@@ -46,8 +46,8 @@ is-instruction-dataset: true
 
 
 ## ---- optimizer ----
-optimizer: muon
-muon-matched-adamw-rms: 0.2
+optimizer: muon-legacy
+muon-legacy-matched-adamw-rms: 0.2
 
 ## ---- context parallel ----
 context-parallel-size: 1
