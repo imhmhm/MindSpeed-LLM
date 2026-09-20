@@ -81,7 +81,7 @@ def add_arguments(parser):
         help='If no weights file, use from_config to load the hf model',
     )
     ## zhh: 与 convert_ckpt_v2.py 的 --hf-cfg-dir 对齐 -- 独立指定 hf 配置目录, 不再要求
-    ## 预先将 config.json 放进 save-dir; 同时把配套的 tokenizer/config 文件拷到输出目录
+    ## 预先把 config.json 放进 save-dir; 同时把配套的 tokenizer/config 文件拷到输出目录
     group.add_argument('--hf-cfg-dir', type=str, default=None,
                        help='Directory to load hugging face config files. Defaults to save-dir '
                             '(mg2hf) or load-dir (hf2mg) when unset.')
