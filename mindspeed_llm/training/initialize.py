@@ -105,9 +105,8 @@ def initialize_megatron(
     else:
         validate_args(args, args_defaults)
 
-    # set global args, and set adlr-autoresume,
+    # set global args, build tokenizer, and set adlr-autoresume,
     # tensorboard-writer, and timers.
-    ## zhh: tokenizer build is deferred to after init_process_group (see below)
     set_global_variables(args, build_tokenizer=False)
 
     # add deterministic computing function

@@ -439,7 +439,6 @@ def register_custom_template(
     name, json_file_path=TEMPLATES_DIR, enable_thinking=False, reasoning_effort=None, drop_thinking=True
 ) -> str:
     if name in templates:
-        ## zhh: mirror upstream 26.1.0 - refresh effort knobs when deepseek4 was registered earlier
         if name == "deepseek4" and reasoning_effort is not None:
             templates[name].reasoning_effort = reasoning_effort
             templates[name].drop_thinking = drop_thinking
