@@ -119,6 +119,7 @@ split: "100,0,0"               ## 组级 train/valid/test 切分(seeded permutat
 log-interval: 1
 save-interval: 1000
 no-save-optim: true
+ckpt-format: torch            ## v2 mcore2hf reads mp_rank_*/model_optim_rng.pt only; 26.0.0 also forced torch
 eval-interval: 200
 eval-iters: 20
 log-timers-to-tensorboard: true
