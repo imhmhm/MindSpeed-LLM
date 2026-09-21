@@ -33,6 +33,7 @@ import os
 import sys
 import re
 import json
+import inspect
 import logging
 from copy import deepcopy
 from pathlib import Path
@@ -362,9 +363,13 @@ def fix_model_tokenizer(
         logger.info("Add pad token: {}".format(tokenizer.pad_token))
 
     if stop_words:
-        num_added_tokens = tokenizer.add_special_tokens(
-            dict(additional_special_tokens=stop_words), replace_additional_special_tokens=False
+        # transformers v5 renamed the kwarg; False keeps extend-without-replace semantics on both
+        extra_kwargs = (
+            {"replace_extra_special_tokens": False}
+            if "replace_extra_special_tokens" in inspect.signature(tokenizer.add_special_tokens).parameters
+            else {"replace_additional_special_tokens": False}
         )
+        num_added_tokens = tokenizer.add_special_tokens(dict(additional_special_tokens=stop_words), **extra_kwargs)
         logger.info("Add {} to stop words.".format(",".join(stop_words)))
         if num_added_tokens > 0:
             logger.warning("New tokens have been added, make sure `resize_vocab` is True.")
