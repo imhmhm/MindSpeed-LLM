@@ -121,6 +121,7 @@ split: "100,0,0"
 log-interval: 1
 save-interval: 400
 no-save-optim: true
+ckpt-format: torch            ## v2 mcore2hf reads mp_rank_*/model_optim_rng.pt only; 26.0.0 also forced torch
 eval-interval: 8000
 eval-iters: 0
 log-timers-to-tensorboard: true
