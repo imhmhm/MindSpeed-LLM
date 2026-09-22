@@ -264,6 +264,12 @@
     "llama2": {
       "__base__": "base"
     },
+    "ailab_slm_mhc": {
+      "__base__": "base",
+      "config_set_value": {
+        "qkv_split": "per_group"
+      }
+    },
     "qwen25": {
       "__base__": "base",
       "config_set_value": {
