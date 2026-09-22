@@ -27,7 +27,7 @@ sync_ckpt:
   # dst: <defaults to computed obs save dir>
 
 mcore2hf_after_training:
-  iters: []      ## empty until CONVERTERS gains ailab_slm_mhc + hc param mapping in convert_ckpt_v2.py
+  iters: []      ## e.g. [1000, 2000]: converted via CONVERTERS["ailab_slm_mhc"] after training
 
 ## ============ mindspeed-llm training args ============
 ## keys are the literal CLI flags (dashes); render emits `--<key>` with no translation.
