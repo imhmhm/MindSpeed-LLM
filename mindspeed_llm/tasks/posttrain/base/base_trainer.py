@@ -129,7 +129,12 @@ class BaseTrainer(ABC):
             if args.mtp_num_layers is not None:
                 mtp_block_spec = get_gpt_mtp_block_spec(config, transformer_layer_spec, use_transformer_engine=use_te)
 
-            model = GPTModel(
+            model_cls = GPTModel
+            if args.enable_mhc:
+                from mindspeed_llm.core.models.gpt.gpt_model_mhc import GPTModelMHC
+                model_cls = GPTModelMHC
+
+            model = model_cls(
                 config=config,
                 transformer_layer_spec=transformer_layer_spec,
                 vocab_size=args.padded_vocab_size,
