@@ -8,6 +8,7 @@ import moxing as mox
 CONVERTERS = {
     "ailab_slm_0_5b____v2": ["--model-type-hf", "llama2",],
     "Qwen3-0.6B": ["--model-type-hf", "qwen3",],
+    "ailab_slm_mhc": ["--model-type-hf", "ailab_slm_mhc",],
 }
 
 LOCAL_CKPT_ROOT = "/cache/inputs/ckpt"
