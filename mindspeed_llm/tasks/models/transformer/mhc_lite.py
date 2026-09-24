@@ -32,44 +32,7 @@ from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.transformer import TransformerConfig, ModuleSpec, build_module
 
 from mindspeed_llm.core.tensor_parallel.layers import LinearNoTP
-from mindspeed_llm.ops.npu_mhc import _mhc_ops, mhc_post_ascend
-from mindspeed_llm.ops.triton.mhc_lite_heads import (
-    TRITON_AVAILABLE,
-    lite_heads_y_forward,
-    lite_pre_backward,
-    lite_grad_x,
-    lite_post_backward,
-)
-
-
-def _triton_lite_enabled():
-    return TRITON_AVAILABLE and os.environ.get('MHC_LITE_TRITON') == '1'
-
-
-def _ascendc_lite_enabled():
-    return TRITON_AVAILABLE and os.environ.get('MHC_LITE_ASCENDC') == '1'
-
-
-def _post_direct_enabled():
-    return os.environ.get('MHC_LITE_POST_DIRECT') == '1'
-
-
-def _mhc_post_call(h_out, x, h_post, h_res):
-    """MHC post forward with a scheme-D direct path: call the aclnn op on
-    natively laid-out tensors and return a permuted view. At B=1 the input
-    permutes are free contiguous views, so the only work dropped is the
-    wrapper's output clone (a full [s,b,e,h] copy); at B>1 inputs still go
-    through .contiguous() as usual."""
-    if _post_direct_enabled():
-        ops = _mhc_ops()
-        out = ops.mhc_post(
-            x.permute(1, 0, 2, 3).contiguous(),
-            h_res.permute(1, 0, 2, 3).contiguous(),
-            h_out.permute(1, 0, 2).contiguous(),
-            h_post.permute(1, 0, 2).contiguous(),
-        )
-        return out.permute(1, 0, 2, 3)
-    return mhc_post_ascend(h_out, x, h_post, h_res)
+from mindspeed_llm.ops.npu_mhc import mhc_post_ascend
 
 
 @dataclass
@@ -95,35 +58,22 @@ def _permutation_mats_flat(n: int) -> torch.Tensor:
 
 
 class _MhcPostFn(torch.autograd.Function):
-    """Fused Ascend mhc_post forward with an explicit backward.
+    """Fused Ascend mhc_post forward with a torch backward.
 
-    out_j = h_post_j * h_out + sum_i h_res[i, j] * x_i. Gradients are
-    recomputed explicitly because the aclnnMhcPostBackward process-first call
-    can hit a tiling cold-init launch failure (characterized in
-    experiments/mhc_lite/README.md): fused triton kernel when enabled, fp32
-    torch reductions otherwise.
+    out_j = h_post_j * h_out + sum_i h_res[i, j] * x_i. The aclnnMhcPostBackward
+    kernel is unstable on some in-range coefficient values (internal launch
+    failure), so gradients are recomputed here in fp32; the four reductions are
+    small next to the streams they read.
     """
 
     @staticmethod
     def forward(ctx, h_out, x, h_post, h_res):
         ctx.save_for_backward(h_out, x, h_post, h_res)
-        ctx.use_triton = _triton_lite_enabled()
-        return _mhc_post_call(h_out, x, h_post, h_res)
+        return mhc_post_ascend(h_out, x, h_post, h_res)
 
     @staticmethod
     def backward(ctx, grad):
         h_out, x, h_post, h_res = ctx.saved_tensors
-        if ctx.use_triton:
-            sb = h_out.shape[0] * h_out.shape[1]
-            e, h = x.shape[2], x.shape[3]
-            dh_out, dx, dh_post, dh_res = lite_post_backward(
-                grad.reshape(sb, e, h),
-                h_out.reshape(sb, h),
-                x.reshape(sb, e, h),
-                h_post.reshape(sb, e),
-                h_res.reshape(sb, e * e),
-            )
-            return dh_out.view_as(h_out), dx.view_as(x), dh_post.view_as(h_post), dh_res.view_as(h_res)
         g = grad.float()
         h_outf = h_out.float()
         grad_h_out = torch.einsum('sbe,sbeh->sbh', h_post, g).to(h_out.dtype)
@@ -131,60 +81,6 @@ class _MhcPostFn(torch.autograd.Function):
         grad_x = torch.matmul(h_res.transpose(-1, -2), g).to(x.dtype)
         grad_res = torch.einsum('sbjh,sbih->sbij', g, x.float())
         return grad_h_out, grad_x, grad_post, grad_res
-
-
-class _LitePreTritonFn(torch.autograd.Function):
-    """Tier-1 lite pre stage: CANN rms_norm + CANN logits GEMM + fused triton
-    heads/y kernel, with a backward built from the triton heads jacobian, the
-    mhc_pre_only y-path kernel and CANN rms_norm backward."""
-
-    @staticmethod
-    def forward(ctx, x, weight, gamma, scale, base, perm_t, eps):
-        s, b, e, h = x.shape
-        sb = s * b
-        xf = x.reshape(sb, e * h)
-        xn, rstd = torch_npu.npu_rms_norm(xf, gamma.type_as(x), epsilon=eps)
-        logits = torch.matmul(xn, weight.type_as(x).t()).float()
-        y, h_pre, h_post, h_res = lite_heads_y_forward(
-            logits, xf.view(sb, e, h), scale.float(), base.float(), perm_t
-        )
-        ctx.save_for_backward(xf, xn, rstd, logits, h_pre, weight, gamma, scale, base)
-        ctx.perm_t = perm_t
-        ctx.x_shape = (s, b, e, h)
-        ctx.eps = eps
-        return y.view(s, b, h), h_post.view(s, b, e), h_res.view(s, b, e, e)
-
-    @staticmethod
-    def backward(ctx, grad_y, grad_h_post, grad_h_res):
-        xf, xn, rstd, logits, h_pre, weight, gamma, scale, base = ctx.saved_tensors
-        s, b, e, h = ctx.x_shape
-        sb = s * b
-
-        dlogits, d_scale, d_base = lite_pre_backward(
-            grad_y.reshape(sb, h),
-            xf.view(sb, e, h),
-            grad_h_post.reshape(sb, e).float(),
-            grad_h_res.reshape(sb, e * e).contiguous(),
-            ctx.perm_t,
-            logits,
-            scale.float(),
-            base.float(),
-        )
-        dlogits_typed = dlogits.to(xn.dtype)
-        grad_weight = torch.matmul(dlogits_typed.t(), xn).to(weight.dtype)
-        d_xn = torch.matmul(dlogits_typed, weight) if weight.dtype == xn.dtype \
-            else torch.matmul(dlogits.to(weight.dtype), weight)
-        d_x_rms, d_gamma = torch_npu.npu_rms_norm_backward(d_xn, xf, gamma.type_as(xf), rstd)
-        grad_x = lite_grad_x(grad_y.reshape(sb, h), h_pre, d_x_rms.view(sb, e, h))
-        return (
-            grad_x.view(s, b, e, h),
-            grad_weight,
-            d_gamma.to(gamma.dtype),
-            d_scale.to(scale.dtype),
-            d_base.to(base.dtype),
-            None,
-            None,
-        )
 
 
 class MHCLite(MegatronModule):
@@ -243,29 +139,12 @@ class MHCLite(MegatronModule):
             self.use_cann_post = False
         if os.environ.get('MHC_LITE_TORCH_POST') == '1':
             self.use_cann_post = False
-        # native aclnn backward is faster; its process-first call can fail with
-        # a tiling cold-init (characterized in experiments/mhc_lite/README.md),
-        # which training call order never hits
-        self.use_native_post_bwd = os.environ.get('MHC_LITE_NATIVE_POST_BWD') == '1'
-        self.use_triton_pre = _triton_lite_enabled()
-        # scheme E: standalone Ascend C LitePreHeads op (bf16 streams only);
-        # its backward is the scheme-B triton kernel set
-        self.use_ascendc_pre = _ascendc_lite_enabled()
 
     def _get_perm_mats(self, device) -> torch.Tensor:
         # class-level cache keeps the fp32 tables out of Float16Module casts
         if device not in self._perm_mats_cache:
-            flat = _permutation_mats_flat(self.hc_mult).to(device)
-            self._perm_mats_cache[device] = (flat, flat.t().contiguous())
-        flat, _ = self._perm_mats_cache[device]
-        return flat
-
-    def _get_perm_mats_t(self, device) -> torch.Tensor:
-        # [16, n_perm] contiguous view for the triton res head (contiguous
-        # rows keep the kernel's table loads vectorized)
-        if device not in self._perm_mats_cache:
-            self._get_perm_mats(device)
-        return self._perm_mats_cache[device][1]
+            self._perm_mats_cache[device] = _permutation_mats_flat(self.hc_mult).to(device)
+        return self._perm_mats_cache[device]
 
     def _coefficients(self, x: torch.Tensor):
         """x: [s,b,e,h] streams -> (h_pre in x.dtype, h_post/h_res in fp32).
@@ -292,18 +171,6 @@ class MHCLite(MegatronModule):
     def hc_pre(self, x: torch.Tensor, *args, **kwargs):
         # x: [s,b,e,h] -> y: [s,b,h]
         s, b, e, h = x.shape
-        if self.use_ascendc_pre and x.dtype == torch.bfloat16:
-            from mindspeed_llm.ops.ascendc.mhc_lite_ac import lite_pre_ascendc
-            return lite_pre_ascendc(
-                x, self.hc_fn.weight, self.hc_gamma, self.hc_scale, self.hc_base,
-                self._get_perm_mats(x.device), self._get_perm_mats_t(x.device),
-                self.norm_eps,
-            )
-        if self.use_triton_pre:
-            return _LitePreTritonFn.apply(
-                x, self.hc_fn.weight, self.hc_gamma, self.hc_scale, self.hc_base,
-                self._get_perm_mats_t(x.device), self.norm_eps,
-            )
         h_pre, h_post, h_res = self._coefficients(x)
         y = torch.matmul(h_pre.view(s * b, 1, e), x.view(s * b, e, h)).view(s, b, h)
         return y.type_as(x), h_post, h_res
@@ -312,11 +179,7 @@ class MHCLite(MegatronModule):
         residual, post, comb = kwargs['residual'], kwargs['post'], kwargs['comb']
 
         # x: [s,b,d], residual: [s,b,e,d], post: [s,b,e] fp32, comb: [s,b,e,e] fp32 -> y: [s,b,e,d]
-        # the Ascend op only accepts fp16/bf16 streams
-        if self.use_cann_post and x.dtype in (torch.bfloat16, torch.float16):
-            if self.use_native_post_bwd:
-                y = _mhc_post_call(x, residual, post, comb)
-                return y.type_as(x)
+        if self.use_cann_post:
             y = _MhcPostFn.apply(x, residual, post, comb)
             return y.type_as(x)
         y = x.unsqueeze(2) * post.type_as(x).unsqueeze(3)
