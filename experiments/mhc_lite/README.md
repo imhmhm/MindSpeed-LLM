@@ -66,6 +66,19 @@ backward 在反向新增数次 streams 级读写。Tier-1 triton 融合收回约
 （~5%），剩余 ~8.7% 差距主要在 pre 反向（full 为 aclnn 融合反向单 kernel，
 lite 为多 kernel 链 + autograd Function 的 python 开销）。
 
+### 原生 aclnn 反向的对照（`bench_post_native_bwd.py` / `bench_full_mhc_ref.py`）
+
+| 环节（S=4096，同布局口径） | aclnn 原生 fwd+bwd | Tier-1 当前 |
+| --- | --- | --- |
+| post（`mhc_post`） | **0.581 ms** | 0.988 ms（fwd 0.129 + K3 0.86） |
+| pre（`mhc_pre_sinkhorn`，仅 full MHC 语义） | 2.177 ms | 3.762 ms |
+
+post 侧若无视 `aclnnMhcPostBackward` 值域缺陷直接用原生反向
+（`MHC_LITE_NATIVE_POST_BWD=1` 开关，默认关）：每次省 ~0.4 ms × 48 调用
+≈ **20 ms/iter（~0.5%）**。pre 侧原生反向与 lite 语义不同
+（sinkhorn vs 单 softmax、无学习 gamma），不能直接复用；其 1.6 ms/次差距
+（≈76 ms/iter）是剩余差距的大头，需更深融合或 CANN 侧 lite 算子。
+
 ## 后续（tier 计划）
 
 - Tier 1（已实现，见下节）：triton 融合 pre/post 侧 kernel，消除多 kernel
