@@ -160,6 +160,52 @@ loss 5.8566 对齐；30-iter 真实训练未触发值域缺陷（此前仅随机
 （dscale 6.3e-02 同为标量扰动敏感）；post triton 反向 vs torch 公式
 dcomb 5.5e-07。
 
+## 社区 910B MHC 实现调研（2026-09）
+
+| 实现 | 形态 | 反向 | 对训练的参考价值 |
+| --- | --- | --- | --- |
+| vllm-ascend `csrc/moe/hc_pre`/`hc_post` | Ascend C 融合算子（rms+GEMM+sinkhorn 20 迭代单 kernel，910B tiling，HF32 matmul，2026-09 仍活跃） | 无（fwd-only，aclnn 注册） | 若做 CANN 侧 lite 融合 pre 算子，其 Ascend C 写法是最直接模板；PyTorch 回退实现可做对拍 |
+| CANN ops-transformer `experimental/mhc`（智子芯元 KernelCAT 生成） | Ascend C 三算子（pre/post/res），sinkhorn 归上层 | 无 | 仅 tiling/精度写法；官方 `mhc/mhc_sinkhorn` aclnn 版仅支持 950PR/DT，910B 不可用 |
+| sgl-kernel-npu | 无实现（CI 中仅有 950 实验 `hc_post` 构建项） | — | 无 |
+| tilelang-ascend `examples/mhc_post` | TileLang，910B 实测 bf16 4.63→0.38ms（纯 Vector 路径，vs CANN 基线 5.98×） | 无（mhc_pre/mhc_bwd 示例 2026-09 曾合入即回退） | mhc_post 的 Vector 优化路径值得对照；backward 不可用 |
+| deepseek TileKernels `tile_kernels/mhc` | TileLang（**仅 SM90/SM100 GPU**） | 有（sinkhorn 自定义 bwd + autograd 感知训练路径） | 反向语义/训练路径的最好范本（GPU-only）；lite 无迭代，仅 full MHC 适用 |
+| yixuan/mHC-proj（arXiv:2606.07574） | CUDA warp 级 | 有（Newton 代 sinkhorn + 隐函数微分免存中间量） | full MHC 反向设计思路参考（GPU-only） |
+| FFTYYY/mhc-lite | 纯 PyTorch 训练实验（同为"去 sinkhorn 迭代"思路） | 有（autograd） | 印证 lite 方向；无 910B kernel |
+
+结论：910B 上带反向的训练级 MHC/lite 实现**开源社区为零**；本仓的 aclnnMhcPreSinkhorn
+（fwd+bwd）+ Tier-2 triton 组合已是唯一可用训练路径。可吸收的外部经验只有写法：
+vllm-ascend 的 Ascend C 融合 pre 模板（上游 lite 算子诉求）、tilelang-ascend 的
+mhc_post Vector 路径。
+
+## torch.compile 在 NPU 上的机制与 naive 实测（`bench_compile.py`）
+
+三条可用编译路径（torch 2.10 + torch_npu 2.10.post6）：
+
+- `aot_eager`：dynamo 捕 FX 图，仍用原 aten 算子执行，只省 python 分发；
+- `inductor`：`torch_npu._inductor` 将 codegen 打到 triton ascend 后端
+  （`npu_triton_heuristics.py`），pointwise/reduction 生成 triton kernel、GEMM 走 extern；
+- `torchair`（`torch_npu.dynamo.torchair.get_npu_backend(compiler_config=...)`）：
+  FX→分解→CANN GE 整图捕获，图级融合 + 单图下发，前向/反向均可成图。
+
+组件级实测（S=4096, B=1, bf16，Tier-0 torch 链复刻为纯函数，`fwd / fwd+bwd` ms）：
+
+| 链 | eager | aot_eager | inductor | torchair |
+| --- | --- | --- | --- | --- |
+| post 公式 | 0.585 / 1.372 | 0.593 / 1.435 | 1.142 / 2.911（慢 ~2×） | **0.462 / 1.096（−21%/−20%）** |
+| pre 全链 | 0.853 / 2.911 | 1.331 / 4.149（慢 ~56%） | 编译失败 | 编译失败 |
+
+- inductor pre 失败：npu codegen 对 0-dim/单元素张量的 broadcast 生成
+  `tl.broadcast_to` rank mismatch（`NoTritonConfigsError`），把 scale/base 切片外提也绕不开；
+- torchair pre 失败：GE `matmul_backward currently only support mask == [True, True]`；
+- inductor post 生成的 triton kernel 全面慢于 CANN 原生算子（与已知 triton-ascend
+  launch 105µs、codegen 质量问题一致）；
+- aot_eager 反而更慢：guard + boxed-arg 包装开销 > 该规模链的 python 分发收益。
+
+**naive 结论**：全链 compile 无增益。唯一可用点是 torchair 编译 post 公式：
+单次省 ~0.28ms × 56 调用 ≈ **15 ms/iter（~0.4%）**，语义为 torch 公式（不触碰
+`aclnnMhcPostBackward` 值域缺陷），且比 Tier-2 的 aclnn 前向 + K3 反向（b02 1.211ms）
+还快 ~10%——可作 Tier-3 候选。
+
 ## 复现
 
 ```bash
@@ -172,6 +218,8 @@ python experiments/mhc_lite/bench_kernels.py
 python experiments/mhc_lite/bench_k1_bisect.py
 python experiments/mhc_lite/bench_pre_bwd_pieces.py
 python experiments/mhc_lite/bench_full_mhc_ref.py
+# torch.compile 三后端 naive 实测
+python experiments/mhc_lite/bench_compile.py
 # mhc_post backward 稳定性矩阵 / 值域复现（会生成 post_backward_case.pt）
 python experiments/mhc_lite/post_backward_shape_matrix.py
 python experiments/mhc_lite/post_backward_repro.py
