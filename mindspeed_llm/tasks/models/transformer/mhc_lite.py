@@ -219,6 +219,9 @@ class MHCLite(MegatronModule):
             self.use_cann_post = False
         if os.environ.get('MHC_LITE_TORCH_POST') == '1':
             self.use_cann_post = False
+        # native aclnn backward is faster but value-dependently unstable
+        # (see experiments/mhc_lite/post_backward_repro.py)
+        self.use_native_post_bwd = os.environ.get('MHC_LITE_NATIVE_POST_BWD') == '1'
         self.use_triton_pre = _triton_lite_enabled()
 
     def _get_perm_mats(self, device) -> torch.Tensor:
@@ -267,6 +270,9 @@ class MHCLite(MegatronModule):
         # x: [s,b,d], residual: [s,b,e,d], post: [s,b,e] fp32, comb: [s,b,e,e] fp32 -> y: [s,b,e,d]
         # the Ascend op only accepts fp16/bf16 streams
         if self.use_cann_post and x.dtype in (torch.bfloat16, torch.float16):
+            if self.use_native_post_bwd:
+                y = mhc_post_ascend(x, residual, post, comb)
+                return y.type_as(x)
             y = _MhcPostFn.apply(x, residual, post, comb)
             return y.type_as(x)
         y = x.unsqueeze(2) * post.type_as(x).unsqueeze(3)

@@ -57,3 +57,15 @@ try:
     print(f'full-MHC aclnn pre fwd+bwd            : {t:.3f} ms')
 except Exception as exc:  # noqa: BLE001
     print(f'full-MHC aclnn pre fwd+bwd            : FAIL {repr(exc)[:100]}')
+
+
+x2 = x.detach().requires_grad_()
+try:
+    def fwd_bwd_pre():
+        y, post, comb = mhc_pre_sinkhorn_ascend(x2, phi, alpha, bias, E, 20, 1e-3, 1e-5)
+        torch.autograd.grad((y, post, comb), (x2, phi, alpha, bias), (gy, gp, gc))
+
+    t = bench(fwd_bwd_pre, iters=10)
+    print(f'full-MHC aclnn pre fwd+bwd (x grad)  : {t:.3f} ms')
+except Exception as exc:  # noqa: BLE001
+    print(f'full-MHC aclnn pre fwd+bwd (x grad)  : FAIL {repr(exc)[:120]}')
