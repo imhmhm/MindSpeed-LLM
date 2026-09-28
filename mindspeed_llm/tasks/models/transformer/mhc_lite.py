@@ -33,6 +33,19 @@ from megatron.core.transformer import TransformerConfig, ModuleSpec, build_modul
 
 from mindspeed_llm.core.tensor_parallel.layers import LinearNoTP
 from mindspeed_llm.ops.npu_mhc import mhc_post_ascend
+from mindspeed_llm.ops.triton.mhc_lite_heads import (
+    TRITON_AVAILABLE,
+    lite_heads_y_forward,
+    lite_res_head_forward,
+    lite_heads_backward,
+    lite_y_backward,
+    lite_add_cast,
+    lite_post_backward,
+)
+
+
+def _triton_lite_enabled():
+    return TRITON_AVAILABLE and os.environ.get('MHC_LITE_TRITON') == '1'
 
 
 @dataclass
@@ -58,22 +71,34 @@ def _permutation_mats_flat(n: int) -> torch.Tensor:
 
 
 class _MhcPostFn(torch.autograd.Function):
-    """Fused Ascend mhc_post forward with a torch backward.
+    """Fused Ascend mhc_post forward with an explicit backward.
 
     out_j = h_post_j * h_out + sum_i h_res[i, j] * x_i. The aclnnMhcPostBackward
     kernel is unstable on some in-range coefficient values (internal launch
-    failure), so gradients are recomputed here in fp32; the four reductions are
-    small next to the streams they read.
+    failure), so gradients are recomputed explicitly: fused triton kernel when
+    enabled, fp32 torch reductions otherwise.
     """
 
     @staticmethod
     def forward(ctx, h_out, x, h_post, h_res):
         ctx.save_for_backward(h_out, x, h_post, h_res)
+        ctx.use_triton = _triton_lite_enabled()
         return mhc_post_ascend(h_out, x, h_post, h_res)
 
     @staticmethod
     def backward(ctx, grad):
         h_out, x, h_post, h_res = ctx.saved_tensors
+        if ctx.use_triton:
+            sb = h_out.shape[0] * h_out.shape[1]
+            e, h = x.shape[2], x.shape[3]
+            dh_out, dx, dh_post, dh_res = lite_post_backward(
+                grad.reshape(sb, e, h),
+                h_out.reshape(sb, h),
+                x.reshape(sb, e, h),
+                h_post.reshape(sb, e),
+                h_res.reshape(sb, e * e),
+            )
+            return dh_out.view_as(h_out), dx.view_as(x), dh_post.view_as(h_post), dh_res.view_as(h_res)
         g = grad.float()
         h_outf = h_out.float()
         grad_h_out = torch.einsum('sbe,sbeh->sbh', h_post, g).to(h_out.dtype)
@@ -81,6 +106,61 @@ class _MhcPostFn(torch.autograd.Function):
         grad_x = torch.matmul(h_res.transpose(-1, -2), g).to(x.dtype)
         grad_res = torch.einsum('sbjh,sbih->sbij', g, x.float())
         return grad_h_out, grad_x, grad_post, grad_res
+
+
+class _LitePreTritonFn(torch.autograd.Function):
+    """Tier-1 lite pre stage: CANN rms_norm + CANN logits GEMM + fused triton
+    heads/y kernel, with a backward built from the triton heads jacobian, the
+    mhc_pre_only y-path kernel and CANN rms_norm backward."""
+
+    @staticmethod
+    def forward(ctx, x, weight, gamma, scale, base, perm_flat, eps):
+        s, b, e, h = x.shape
+        sb = s * b
+        xf = x.reshape(sb, e * h)
+        xn, rstd = torch_npu.npu_rms_norm(xf, gamma.type_as(x), epsilon=eps)
+        logits = torch.matmul(xn, weight.type_as(x).t()).float()
+        y, h_pre, h_post = lite_heads_y_forward(
+            logits, xf.view(sb, e, h), scale.float(), base.float()
+        )
+        h_res = lite_res_head_forward(logits, scale.float(), base.float(), perm_flat)
+        ctx.save_for_backward(xf, xn, rstd, logits, h_pre, weight, gamma, scale, base)
+        ctx.perm_flat_t = perm_flat.t()
+        ctx.x_shape = (s, b, e, h)
+        ctx.eps = eps
+        return y.view(s, b, h), h_post.view(s, b, e), h_res.view(s, b, e, e)
+
+    @staticmethod
+    def backward(ctx, grad_y, grad_h_post, grad_h_res):
+        xf, xn, rstd, logits, h_pre, weight, gamma, scale, base = ctx.saved_tensors
+        s, b, e, h = ctx.x_shape
+        sb = s * b
+
+        d_h_pre, d_x_direct = lite_y_backward(
+            grad_y.reshape(sb, h), xf.view(sb, e, h), h_pre
+        )
+        dcoeff = torch.matmul(grad_h_res.reshape(sb, e * e).float(), ctx.perm_flat_t)
+        dlogits, d_scale, d_base = lite_heads_backward(
+            d_h_pre,
+            grad_h_post.reshape(sb, e).float(),
+            dcoeff,
+            logits,
+            scale.float(),
+            base.float(),
+        )
+        grad_weight = torch.matmul(dlogits.t().to(xn.dtype), xn).to(weight.dtype)
+        d_xn = torch.matmul(dlogits.to(weight.dtype), weight)
+        d_x_rms, d_gamma = torch_npu.npu_rms_norm_backward(d_xn, xf, gamma.type_as(xf), rstd)
+        grad_x = lite_add_cast(d_x_direct, d_x_rms.view(sb, e, h))
+        return (
+            grad_x.view(s, b, e, h),
+            grad_weight,
+            d_gamma.to(gamma.dtype),
+            d_scale.to(scale.dtype),
+            d_base.to(base.dtype),
+            None,
+            None,
+        )
 
 
 class MHCLite(MegatronModule):
@@ -139,6 +219,7 @@ class MHCLite(MegatronModule):
             self.use_cann_post = False
         if os.environ.get('MHC_LITE_TORCH_POST') == '1':
             self.use_cann_post = False
+        self.use_triton_pre = _triton_lite_enabled()
 
     def _get_perm_mats(self, device) -> torch.Tensor:
         # class-level cache keeps the fp32 tables out of Float16Module casts
@@ -171,6 +252,11 @@ class MHCLite(MegatronModule):
     def hc_pre(self, x: torch.Tensor, *args, **kwargs):
         # x: [s,b,e,h] -> y: [s,b,h]
         s, b, e, h = x.shape
+        if self.use_triton_pre:
+            return _LitePreTritonFn.apply(
+                x, self.hc_fn.weight, self.hc_gamma, self.hc_scale, self.hc_base,
+                self._get_perm_mats(x.device), self.norm_eps,
+            )
         h_pre, h_post, h_res = self._coefficients(x)
         y = torch.matmul(h_pre.view(s * b, 1, e), x.view(s * b, e, h)).view(s, b, h)
         return y.type_as(x), h_post, h_res
@@ -179,7 +265,8 @@ class MHCLite(MegatronModule):
         residual, post, comb = kwargs['residual'], kwargs['post'], kwargs['comb']
 
         # x: [s,b,d], residual: [s,b,e,d], post: [s,b,e] fp32, comb: [s,b,e,e] fp32 -> y: [s,b,e,d]
-        if self.use_cann_post:
+        # the Ascend op only accepts fp16/bf16 streams
+        if self.use_cann_post and x.dtype in (torch.bfloat16, torch.float16):
             y = _MhcPostFn.apply(x, residual, post, comb)
             return y.type_as(x)
         y = x.unsqueeze(2) * post.type_as(x).unsqueeze(3)
