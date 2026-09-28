@@ -1,5 +1,5 @@
 # Copyright (c) 2026, HUAWEI CORPORATION.  All rights reserved.
-"""Time the restructured Tier-1 kernels standalone (K1' heads+y, K2 heads-bwd, K3 post-bwd)."""
+"""Time the Tier-2 kernels standalone (heads+y fwd, pre bwd, grad_x, post bwd)."""
 
 import sys
 import time
@@ -13,8 +13,8 @@ import torch_npu
 
 from mindspeed_llm.ops.triton.mhc_lite_heads import (
     lite_heads_y_forward,
-    lite_res_head_forward,
-    lite_heads_backward,
+    lite_pre_backward,
+    lite_grad_x,
     lite_post_backward,
 )
 
@@ -29,7 +29,7 @@ logits = torch.randn(BS, N_TOTAL, device=DEV, dtype=torch.float32)
 x = torch.randn(BS, E, D, device=DEV, dtype=torch.bfloat16)
 scale = torch.tensor([0.011, 0.013, 0.017], device=DEV, dtype=torch.float32)
 base = torch.randn(N_TOTAL, device=DEV, dtype=torch.float32) * 0.5
-perm_flat = torch.rand(NP, 16, device=DEV, dtype=torch.float32).softmax(dim=0)
+perm_t = torch.rand(16, NP, device=DEV, dtype=torch.float32).softmax(dim=0)
 
 
 def bench(fn, iters=30):
@@ -43,30 +43,23 @@ def bench(fn, iters=30):
     return (time.time() - t0) / iters * 1e3
 
 
-t = bench(lambda: lite_heads_y_forward(logits, x, scale, base))
-print(f"K1' heads+y          : {t:.3f} ms")
-t = bench(lambda: lite_res_head_forward(logits, scale, base, perm_flat))
-print(f"res head (torch)     : {t:.3f} ms")
+y, h_pre, h_post, h_res = lite_heads_y_forward(logits, x, scale, base, perm_t)
+torch.npu.synchronize()
 
-ghpre = torch.randn(BS, 4, device=DEV, dtype=torch.float32)
+t = bench(lambda: lite_heads_y_forward(logits, x, scale, base, perm_t))
+print(f'K1 heads+y fwd (K1a+K1b)  : {t:.3f} ms')
+
 ghpost = torch.randn(BS, 4, device=DEV, dtype=torch.float32)
 dcoeff = torch.randn(BS, NP, device=DEV, dtype=torch.float32)
-t = bench(lambda: lite_heads_backward(ghpre, ghpost, dcoeff, logits, scale, base))
-print(f"K2 heads bwd         : {t:.3f} ms")
+g = torch.randn(BS, D, device=DEV, dtype=torch.bfloat16)
+t = bench(lambda: lite_pre_backward(g, x, ghpost, dcoeff, logits, scale, base))
+print(f'megaK pre bwd (+reduce)   : {t:.3f} ms')
 
-g = torch.randn(BS, E, D, device=DEV, dtype=torch.bfloat16)
+d_x_rms = torch.randn(BS, E, D, device=DEV, dtype=torch.bfloat16)
+t = bench(lambda: lite_grad_x(g, h_pre, d_x_rms))
+print(f'grad_x (recompute)        : {t:.3f} ms')
+
 h_out = torch.randn(BS, D, device=DEV, dtype=torch.bfloat16)
-h_post = torch.rand(BS, 4, device=DEV, dtype=torch.float32)
-h_res = torch.rand(BS, 16, device=DEV, dtype=torch.float32)
-t = bench(lambda: lite_post_backward(g, h_out, x, h_post, h_res))
-print(f"K3 post bwd          : {t:.3f} ms")
-
-# control: the existing repo kernel, same geometry (GROUP=2, BLOCK_D=D)
-from mindspeed_llm.ops.triton.mhc_pre_only import hc_pre_bmm_forward  # noqa: E402
-
-h_pre4 = torch.rand(BS, 4, device=DEV, dtype=torch.float32).softmax(-1)
-t = bench(lambda: hc_pre_bmm_forward(h_pre4.view(1, BS, 4), x.view(1, BS, E, D)))
-print(f"existing hc_pre_bmm_fwd (G=2): {t:.3f} ms")
-
-t = bench(lambda: lite_heads_y_forward(logits, x, scale, base))
-print(f"K1' recheck                    : {t:.3f} ms")
+gg = torch.randn(BS, E, D, device=DEV, dtype=torch.bfloat16)
+t = bench(lambda: lite_post_backward(gg, h_out, x, h_post, h_res.view(BS, 16)))
+print(f'K3 post bwd               : {t:.3f} ms')

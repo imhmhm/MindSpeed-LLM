@@ -58,7 +58,14 @@ dpost 6.0e-07 / dcomb 0。
 | --- | --- | --- | --- | --- |
 | full MHC（fused CANN） | ~3680 | 42.6–42.9 | 5.859 | 0.311 |
 | mhc_lite Tier-0（torch 链） | ~4210 | 37.1–37.7 | 5.857 | 0.314 |
-| mhc_lite Tier-1（triton） | **~4000** | 37.9–39.5 | 5.856 | 0.313 |
+| mhc_lite Tier-1（triton） | ~4005 | 37.9–39.5 | 5.856 | 0.313 |
+| mhc_lite Tier-2（triton） | ~3767 | 41.8–42.2 | 5.857 | 0.313 |
+| **Tier-2 + 原生 post 反向** | **~3583** | 42.8–44.3 | 5.856 | 0.313 |
+
+Tier-2 + 原生 post 反向（`MHC_LITE_TRITON=1 MHC_LITE_NATIVE_POST_BWD=1`）
+比 full MHC 快约 2.7%——融合度拉平后，lite 免去 sinkhorn 迭代的优势开始
+显现；该组合依赖值域不稳定的 `aclnnMhcPostBackward`（两次 30-iter 冒烟
+未触发，但随机值下可复现，见 `post_backward_repro.py`）。
 
 Tier-0 比主线慢约 14%：full 的 fused pre 算子把 norm+logits+sinkhorn+三头+y
 合成单个 kernel，而 lite 的 pre 侧是 6–8 个 kernel，且 `_MhcPostFn` 的 torch
@@ -81,10 +88,44 @@ post 侧若无视 `aclnnMhcPostBackward` 值域缺陷直接用原生反向
 
 ## 后续（tier 计划）
 
-- Tier 1（已实现，见下节）：triton 融合 pre/post 侧 kernel，消除多 kernel
-  开销与 post 反向的多次 streams 级读写；
+- Tier 1（已实现）：triton 融合 pre/post 侧 kernel，消除多 kernel 开销；
+- Tier 2（已实现）：launch/python 开销与中间量物化的消除（见下节）；
 - backlog：调研比 lite 更高效的开源 MHC 变体（TileKernels/sglang/vLLM/CANN
-  上游）并择优吸收。
+  上游）并择优吸收；CANN 侧 lite 版融合 pre 算子（无 sinkhorn，理论快于
+  full 的 mhc_pre_sinkhorn）。
+
+## Tier 2：差距归因与消除（`MHC_LITE_TRITON=1`）
+
+### 为什么"无迭代"却没有更快（归因，L=28 → 56 次 pre + 56 次 post/iter）
+
+1. **迭代本身不耗时**：full 的 20 步 sinkhorn 作用在 [bs,16] 小张量上，
+   在融合 kernel 内是 µs 级；两边的主体成本同为 norm+GEMM+三头+y 数据流。
+   lite 的省略只占 <5% 计算量，融合度不齐平时完全被淹没。
+2. **launch 分发开销（实测探针 `probe_overheads.py`）**：triton JIT launch
+   **105µs/次**（torch 原生 21µs，autograd Function fwd+bwd python ~0.3ms）。
+   Tier-1 的 pre fwd+bwd 有 18 个 launch（6 个 triton），full 只有 2 个
+   aclnn；仅分发 ≈1.1ms/调用。
+3. **中间量物化**：xn/dx_direct/d_x_rms/d_xn 等 32MB 级中间张量多次往返，
+   pre fwd+bwd ≈330MB vs full 融合 ≈130MB。
+
+### Tier-2 手段与效果（S=4096 组件级）
+
+| 手段 | 效果 |
+| --- | --- |
+| `_launch`：CompiledKernel 直调缓存（需 3D grid；105→48.8µs） | 全部 kernel 分发减半 |
+| K1a 并入 res 头（softmax+16 置换列和，[16,NP] **连续**转置表） | 16× stride-16 gather 放大消除，K1 全家 0.53→0.275 ms |
+| megaK：K4+K2 合一（dW 简约 + 三头 jacobian，寄存器传递） | pre bwd 1.06→0.855 ms，少 1 launch |
+| `lite_grad_x`：重算 w·g 取代 dx_direct 物化 | 0.73→0.171 ms，省 64MB/次 |
+
+结果：hc_pre fwd **0.682 ms（比 full 融合算子 fwd 1.049 快 35%）**；
+hc_pre fwd+bwd 3.76→**2.74 ms**（full 2.18）；数值 parity 同 Tier-1
+（fp32 梯度 ≤1.1e-05）。
+
+### post 原生反向实测（`MHC_LITE_NATIVE_POST_BWD=1`，30-iter）
+
+`bench_post_native_bwd.py`：aclnn 原生 fwd+bwd 0.581 ms vs K3 路径
+0.988 ms；**端到端实测 median 3949.6 vs 4005 ms（省 ~55ms/iter，1.4%）**，
+loss 5.8566 对齐；30-iter 真实训练未触发值域缺陷（此前仅随机值 seed=1 复现）。
 
 ## Tier 1：triton 融合 kernel（`MHC_LITE_TRITON=1`）
 

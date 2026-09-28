@@ -36,10 +36,8 @@ from mindspeed_llm.ops.npu_mhc import mhc_post_ascend
 from mindspeed_llm.ops.triton.mhc_lite_heads import (
     TRITON_AVAILABLE,
     lite_heads_y_forward,
-    lite_res_head_forward,
-    lite_heads_backward,
-    lite_y_backward,
-    lite_add_cast,
+    lite_pre_backward,
+    lite_grad_x,
     lite_post_backward,
 )
 
@@ -114,18 +112,17 @@ class _LitePreTritonFn(torch.autograd.Function):
     mhc_pre_only y-path kernel and CANN rms_norm backward."""
 
     @staticmethod
-    def forward(ctx, x, weight, gamma, scale, base, perm_flat, eps):
+    def forward(ctx, x, weight, gamma, scale, base, perm_t, eps):
         s, b, e, h = x.shape
         sb = s * b
         xf = x.reshape(sb, e * h)
         xn, rstd = torch_npu.npu_rms_norm(xf, gamma.type_as(x), epsilon=eps)
         logits = torch.matmul(xn, weight.type_as(x).t()).float()
-        y, h_pre, h_post = lite_heads_y_forward(
-            logits, xf.view(sb, e, h), scale.float(), base.float()
+        y, h_pre, h_post, h_res = lite_heads_y_forward(
+            logits, xf.view(sb, e, h), scale.float(), base.float(), perm_t
         )
-        h_res = lite_res_head_forward(logits, scale.float(), base.float(), perm_flat)
         ctx.save_for_backward(xf, xn, rstd, logits, h_pre, weight, gamma, scale, base)
-        ctx.perm_flat_t = perm_flat.t()
+        ctx.perm_t = perm_t
         ctx.x_shape = (s, b, e, h)
         ctx.eps = eps
         return y.view(s, b, h), h_post.view(s, b, e), h_res.view(s, b, e, e)
@@ -136,12 +133,10 @@ class _LitePreTritonFn(torch.autograd.Function):
         s, b, e, h = ctx.x_shape
         sb = s * b
 
-        d_h_pre, d_x_direct = lite_y_backward(
-            grad_y.reshape(sb, h), xf.view(sb, e, h), h_pre
-        )
-        dcoeff = torch.matmul(grad_h_res.reshape(sb, e * e).float(), ctx.perm_flat_t)
-        dlogits, d_scale, d_base = lite_heads_backward(
-            d_h_pre,
+        dcoeff = torch.matmul(grad_h_res.reshape(sb, e * e).float(), ctx.perm_t)
+        dlogits, d_scale, d_base = lite_pre_backward(
+            grad_y.reshape(sb, h),
+            xf.view(sb, e, h),
             grad_h_post.reshape(sb, e).float(),
             dcoeff,
             logits,
@@ -151,7 +146,7 @@ class _LitePreTritonFn(torch.autograd.Function):
         grad_weight = torch.matmul(dlogits.t().to(xn.dtype), xn).to(weight.dtype)
         d_xn = torch.matmul(dlogits.to(weight.dtype), weight)
         d_x_rms, d_gamma = torch_npu.npu_rms_norm_backward(d_xn, xf, gamma.type_as(xf), rstd)
-        grad_x = lite_add_cast(d_x_direct, d_x_rms.view(sb, e, h))
+        grad_x = lite_grad_x(grad_y.reshape(sb, h), h_pre, d_x_rms.view(sb, e, h))
         return (
             grad_x.view(s, b, e, h),
             grad_weight,
@@ -227,8 +222,17 @@ class MHCLite(MegatronModule):
     def _get_perm_mats(self, device) -> torch.Tensor:
         # class-level cache keeps the fp32 tables out of Float16Module casts
         if device not in self._perm_mats_cache:
-            self._perm_mats_cache[device] = _permutation_mats_flat(self.hc_mult).to(device)
-        return self._perm_mats_cache[device]
+            flat = _permutation_mats_flat(self.hc_mult).to(device)
+            self._perm_mats_cache[device] = (flat, flat.t().contiguous())
+        flat, _ = self._perm_mats_cache[device]
+        return flat
+
+    def _get_perm_mats_t(self, device) -> torch.Tensor:
+        # [16, n_perm] contiguous view for the triton res head (contiguous
+        # rows keep the kernel's table loads vectorized)
+        if device not in self._perm_mats_cache:
+            self._get_perm_mats(device)
+        return self._perm_mats_cache[device][1]
 
     def _coefficients(self, x: torch.Tensor):
         """x: [s,b,e,h] streams -> (h_pre in x.dtype, h_post/h_res in fp32).
@@ -258,7 +262,7 @@ class MHCLite(MegatronModule):
         if self.use_triton_pre:
             return _LitePreTritonFn.apply(
                 x, self.hc_fn.weight, self.hc_gamma, self.hc_scale, self.hc_base,
-                self._get_perm_mats(x.device), self.norm_eps,
+                self._get_perm_mats_t(x.device), self.norm_eps,
             )
         h_pre, h_post, h_res = self._coefficients(x)
         y = torch.matmul(h_pre.view(s * b, 1, e), x.view(s * b, e, h)).view(s, b, h)
