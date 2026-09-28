@@ -206,6 +206,53 @@ mhc_post Vector 路径。
 `aclnnMhcPostBackward` 值域缺陷），且比 Tier-2 的 aclnn 前向 + K3 反向（b02 1.211ms）
 还快 ~10%——可作 Tier-3 候选。
 
+## 参考实现精读与借鉴实验（`bench_borrowed.py`，2026-09）
+
+精读三个参考仓后的可借鉴点与实测（S=4096, B=1, bf16，基线 = ms-llm 原有
+mhc_sinkhorn fused 路径）：
+
+**vllm-ascend `hc_pre`/`hc_post`（Ascend C，fwd-only）**
+- hc_pre 为 AIC/AIV 协同单 kernel 两段式：AIV 把 x cast fp32 写 GM workspace、
+  AIC 做 cube GEMM，Part2 在 vector 上完成 K-split 归约 + RMS（squareSum 走
+  `GatherMaskByDiagonal` 取对角）+ 三头 + y（cast→Brcb 广播乘→ReduceSum，无矩阵
+  引擎）+ **sinkhorn 20 迭代全在 kernel 内**（每步 row/col sum 后 `+eps` 再除）；
+- hc_post 用 **MicroAPI 寄存器级**实现：每 token 的 post/comb 标量以
+  `DIST_BRC_B16` 广播进寄存器，x/residual 单遍 unpack，fp32 `MulAddDst` FMA
+  累加——post 是访存受限算子，最优形态 = 单遍向量 FMA，不走 cube；
+- cube GEMM 在 fp32 上做（x 先 cast），精度优先。
+
+**KernelCAT `ops-transformer/experimental/mhc`（Ascend C，fwd-only）**：mHC
+（流形约束、**逐层静态权重**）三算子分解 pre/post/res，UB 动态 tiling
+（192KB 预算 + buffer 数算术），bf16 走 cast-fp32-计算-cast 回。分解思路与
+lite 的三头结构同源，但其"权重静态"设定不含我们的动态 per-token 场景。
+
+**tilelang-ascend `examples/mhc_post`（910B, CANN 9.0, V0→V10 记录）**：
+- V0 cube 双 kernel 4.63ms → V10 纯 Vector 单 kernel 0.38ms（n=4096,h=2560，
+  vs CANN 基线 5.98×）。关键教训：hc=4 的 [4,4]@[4,h] 用 cube 需 pad 到 16、
+  浪费 93.75% MAC；**AXPY（`T.tile.axpy` 标量乘加）替代 broadcast+mul+reduce_sum
+  是最大单项突破**（消除 7 个 2D fp32 UB buffer，UB 省 3/4 使 h_blk 提到 2048）；
+- 其余：双 V 核按 token 划分、循环不变量（comb）外提、2D merged copy/store、
+  自适应 h_blk 取 h 的最大因数消除 padding、`T.Pipelined` 双缓冲、kernel 缓存。
+
+### 借鉴实验结果
+
+| # | 对照（同 shape 同 dtype） | 结果 | 结论 |
+| --- | --- | --- | --- |
+| A1 | 主线 torch 回退 post（broadcast+sum 形式，`mhc.py:286`） | 1.529 ms | 正是 tilelang V1 判定慢的形式，还物化 [s,b,4,d] fp32 中间量 |
+| A2 | bmm 形式（Tier-0 同构） | 0.573 ms | cube bmm 仍优于 eager broadcast 链 |
+| A3 | AXPY 形式（`addcmul_` 累加，tilelang V4 思想的 eager 近似） | 1.469 ms | **AXPY 收益只在 kernel 内**：eager 下 17 次 launch 抵消算法优势 |
+| A4 | aclnn `mhc_post` 裸调（op 原生布局） | **0.114 ms** | CANN 算子已是 MicroAPI 向量路径，比最好的 eager 形式快 5× |
+| A5 | 经 `npu_mhc` wrapper（[s,b]↔[b,s] 布局适配） | 0.179 ms | wrapper 的输出 `clone()` 代价 **0.065 ms/次 ≈ 3.6 ms/iter**（B=1；B>1 时输入也要拷贝，代价更大）——主线可优化点 |
+| B1 | lite res 头 triton kernel（softmax+置换表） | 0.114 ms | 与 torch 参考（0.151ms）对齐 |
+| B2 | full sinkhorn-20 头 triton kernel（行/列迭代全在 kernel 内，vllm-ascend 借鉴） | **0.228 ms** | 迭代使头部成本 ×2；eager sinkhorn 循环要 3.294ms（kernel 内快 14×）。**lite 免迭代在等融合度下省 ~0.11 ms/次 ≈ 6 ms/iter（0.17%）**——理论优势存在但幅度小，印证 Tier-2 的归因 |
+| C1/C2 | logits GEMM bf16 vs fp32（含 cast） | 0.035 / 0.087 ms | fp32 GEMM 对数 logits 误差 1.6e-02→0（vs fp64）；+0.05ms/次（×56≈3ms/iter）可换精度，是 lite 可选的精度开关（vllm-ascend 选 fp32 cube） |
+
+综合：社区参考在 torch 层可吸收的只有"**别用 broadcast 链**"（主线回退路径
+1.53→0.57ms，若走非 fused 回退值得改）；性能上限仍取决于算子级融合
+（aclnn/AIC-AIV 协同/MicroAPI），这正是 Tier-2 triton 与上游 lite 融合算子
+诉求的方向。wrapper 布局适配的 3.6ms/iter 与 fp32 GEMM 精度开关是两个
+立即可落地的主线优化点。
+
 ## 复现
 
 ```bash
