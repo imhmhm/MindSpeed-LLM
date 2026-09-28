@@ -253,6 +253,17 @@ lite 的三头结构同源，但其"权重静态"设定不含我们的动态 per
 诉求的方向。wrapper 布局适配的 3.6ms/iter 与 fp32 GEMM 精度开关是两个
 立即可落地的主线优化点。
 
+### tilelang 直测受阻（环境限制）
+
+`bench_tilelang_post.py` 已就绪：在本仓 shape（n=4096, hc=4, h=1024）跑
+tilelang V10 纯 Vector kernel vs eager bmm vs aclnn 裸调三方对照——注意
+tilelang 仓自称的 "vs CANN 5.98×" 基线是 eager bmm，与 aclnn 融合算子的
+对照社区尚未报过。未能执行的原因：pypi 的 tilelang-ascend 0.1.4 wheel 需
+glibc 2.38（本机 2.34）；GitHub release 的 0.1.1.10 ubuntu20.4 wheel 经
+本机网络代理两次获取失败（一次恰好截断在 20MiB 整、一次 404，代理拒绝
+Range 续传）。在无该限制的网络下装好 0.1.1.10 wheel 后直接运行即可
+（需 conda libstdc++ 前置 LD_LIBRARY_PATH，见脚本头注释）。
+
 ## 复现
 
 ```bash
