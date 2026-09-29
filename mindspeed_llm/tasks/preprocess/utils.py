@@ -80,7 +80,7 @@ def get_handler_dataset_attr(data_args, raw_datasets):
     elif "SharegptStyle" or "hunyuan" in data_args.handler_name:
         dataset_attr.formatting = "sharegpt"
         tag_names = ["role_tag", "content_tag", "user_tag", "assistant_tag", "observation_tag", "function_tag", "system_tag"]
-        column_names = ["messages", "tags", "system", "tools", "chosen", "rejected", "kto_tag"]
+        column_names = ["messages", "tags", "system", "tools", "chosen", "rejected", "kto_tag", "reasoning_tag"]
 
         if data_args.map_keys is not None:
             check_dataset_info_map(data_args, column_names, raw_datasets, tag_names)
@@ -328,6 +328,9 @@ def convert_sharegpt_to_intermediate(
 
     aligned_messages = []
     broken_data = False
+    # maps a per-message JSON field (e.g. "thought") onto the canonical
+    # reasoning_content key; only active when the user maps reasoning_tag
+    reasoning_tag = getattr(dataset_attr, "reasoning_tag", None)
     for turn_idx, message in enumerate(messages):
         if dataset_attr.ranking and dataset_attr.messages in [dataset_attr.chosen, dataset_attr.rejected]:
             ## zhh: pairwise example
@@ -343,9 +346,12 @@ def convert_sharegpt_to_intermediate(
         content_value = message.get(dataset_attr.content_tag)
 
         if content_value is not None:
-            aligned_messages.append(
-                {"role": tag_mapping.get(message.get(dataset_attr.role_tag), "unknown"), "content": content_value}
-            )
+            new_msg = {"role": tag_mapping.get(message.get(dataset_attr.role_tag), "unknown"), "content": content_value}
+            # attach to every message ("" when absent) so the aligned dataset
+            # keeps a homogeneous message schema across batches
+            if reasoning_tag:
+                new_msg["reasoning_content"] = message.get(reasoning_tag) or ""
+            aligned_messages.append(new_msg)
         else:
             logger.warning(f"Missing content tag in message at turn {turn_idx}: {message}")
 
