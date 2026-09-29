@@ -30,17 +30,23 @@ mhc_lite（V1 语义：带学习 gamma 的 RMSNorm + h_pre/h_post/h_res 三头�
 
 ## CANN `mhc_post` backward 的首调缺陷（重要，结论已修正）
 
-`aclnnMhcPostBackward` 在**进程内第一次调用、且 batch≥2** 时必然失败
-（异步 `AclNN_Runtime_Error` EZ9903，错误串含 `InitTilingParseCtx failed`，
-tiling 冷启动），第二次起全部正常；**与输入取值/seed 完全无关**。定性证据
-（`post_backward_order_probe.py`，每个场景一个全新子进程）：
+`aclnnMhcPostBackward` 在**进程内第一次调用**时可能失败
+（异步 `AclNN_Runtime_Error` EZ9903，错误串含 `InitTilingParseCtx failed`；
+plog 指向 backward 图内部的 **BroadcastTo** 子算子——
+`TilingPrepare4BroadcastTo: CreateAutoTilingHandler return nullptr`，
+tiling 冷启动），第二次起全部正常；触发面由 shape 与**梯度模式**共同决定，
+与输入取值/seed 无关：随机梯度下 B≥2 必挂、B=1 通过；全 1 梯度
+（`.sum().backward()` 型）连 B=1 也挂。定性证据
+（`post_backward_order_probe.py`，每个场景一个全新子进程，梯度均为随机）：
 
 | 场景（S=512 B=2 除注明；bad/good = seed 1/2 的值） | 结果 |
 | --- | --- |
 | bad / good / seed0 单跑 | 首调 RAISE（与取值无关） |
 | bad,bad / seed0,seed0 / good,good | RAISE,OK（同值第二次必过） |
-| bad@4096x1 / bad@512x1（同 seed 1 值，B=1） | **OK**（B=1 首调免疫） |
-| bad@512x4 | RAISE（B≥2 首调必挂） |
+| bad@4096x1 / bad@512x1（同 seed 1 值，B=1） | **OK**（随机梯度下 B=1 通过） |
+| bad@512x4 | RAISE（随机梯度下 B≥2 必挂） |
+| B=1 + `rand` 值 + `.sum()` 全 1 梯度 | RAISE（3/3；梯度模式参与触发） |
+| B=1 + `rand` 值 + 随机梯度 | OK（3/3；安全 warm-up 形态） |
 | bad@512x1,bad | OK,OK（B=1 首调把 B=2 也预热） |
 | fwd1 / fwd35 后 bad | WARM,RAISE（**mhc_post 前向不预热**） |
 | prefwd 后 bad | WARM,RAISE（**pre 仅前向也不预热**） |
@@ -50,15 +56,17 @@ tiling 冷启动），第二次起全部正常；**与输入取值/seed 完全�
   `post_backward_repro.py` 恒把 bad 用例排在进程第一个 backward，其
   pairwise/leave-one-out 混合"全过"只是因为都已不是首调。
 - 旧"与 shape 无关"同样是伪象：`post_backward_shape_matrix.py` 恰好先跑
-  (b=1,s=512)，把后面的 b=2/4 全部预热。真实规律是 **B=1 首调免疫、
-  B≥2 首调必挂**。
+  (b=1,s=512)，把后面的 b=2/4 全部预热。真实规律是 **首调 +（B≥2 或
+  触发型梯度模式）必挂**；随机梯度 + B=1 是已验证的安全首调形态
+  （shape matrix 的 (1,512) 直连算子首调通过则另有 wrapper/调用路径差异，
+  未再深挖——warm-up 手段已足够）。
 - 单进程 seed 扫描不可信（`post_backward_seed_sweep.py`，留档）：首调异步
   报错后 context 被污染（对照用例返回 GRAD-BAD），其"0/100 挂"只是因为
   首调之后再无首调。
 - 预热源是**任意一次 backward**（本算子任意 shape，或 mhc_pre_sinkhorn 的
   backward——tiling 解析上下文应为跨算子共享）；前向再多也不触发初始化，
   等待也不行（prefwd 场景进程启动 20+s 后首调仍挂）。
-- **主线训练结构上安全**：B=1 免疫；mbs≥2 时反向图序保证首个 mhc_post
+- **主线训练结构上安全**：B=1 + 随机梯度通过；mbs≥2 时反向图序保证首个 mhc_post
   backward 之前已跑过大量其他算子 backward（lm_head/attention/MLP），
   共享上下文已就绪——两次 30-iter 冒烟从未触发与此一致。真正暴露面是
   "孤立进程 + B≥2 + 首个 backward 就是 mhc_post"（单测/独立 bench），
@@ -88,8 +96,8 @@ dpost 6.0e-07 / dcomb 0。
 
 Tier-2 + 原生 post 反向（`MHC_LITE_TRITON=1 MHC_LITE_NATIVE_POST_BWD=1`）
 比 full MHC 快约 2.7%——融合度拉平后，lite 免去 sinkhorn 迭代的优势开始
-显现；该组合使用的 `aclnnMhcPostBackward` 缺陷为 B≥2 首调冷启动
-（见上节），训练时序下结构性安全。
+显现；该组合使用的 `aclnnMhcPostBackward` 缺陷为首调冷启动（随机梯度下
+B≥2 才触发，见上节），训练时序下结构性安全。
 
 Tier-0 比主线慢约 14%：full 的 fused pre 算子把 norm+logits+sinkhorn+三头+y
 合成单个 kernel，而 lite 的 pre 侧是 6–8 个 kernel，且 `_MhcPostFn` 的 torch
@@ -105,10 +113,50 @@ lite 为多 kernel 链 + autograd Function 的 python 开销）。
 | pre（`mhc_pre_sinkhorn`，仅 full MHC 语义） | 2.177 ms | 3.762 ms |
 
 post 侧若直接用原生反向（`MHC_LITE_NATIVE_POST_BWD=1` 开关，默认关；
-B≥2 首调需先 warm-up 一次，见首调缺陷一节）：每次省 ~0.4 ms × 48 调用
+孤立进程需先做一次 B=1 随机梯度 warm-up，见首调缺陷一节）：每次省 ~0.4 ms × 48 调用
 ≈ **20 ms/iter（~0.5%）**。pre 侧原生反向与 lite 语义不同
 （sinkhorn vs 单 softmax、无学习 gamma），不能直接复用；其 1.6 ms/次差距
 （≈76 ms/iter）是剩余差距的大头，需更深融合或 CANN 侧 lite 算子。
+
+## 优化 campaign 基线（`bench_lite_e2e.py`）
+
+组件级 e2e harness，优化实验的统一口径：同一模块链（pre 段、pre+post 全链）
+的 fwd 与 fwd+bwd 计时 + 两级精度门卡。S=4096 B=1 bf16，每变体独立子进程
+（env 开关在模块 init / 调用点读取）；run-to-run 抖动 ~1–4%（lite-t2 首轮
+曾整体偏慢 ~8%，以复跑为准）。
+
+| 变体 | pre fwd | pre fwd+bwd | e2e fwd | e2e fwd+bwd | 门卡 |
+| --- | --- | --- | --- | --- | --- |
+| full-cann（aclnn fused 全链，full-MHC 语义） | 0.663 | 2.145 | 0.918 | 2.925 | 自有参考（informational） |
+| lite-t0（torch 链） | 0.892 | 2.422 | 1.212 | 3.706 | PASS |
+| lite-t2（`MHC_LITE_TRITON=1`） | 0.710 | 2.121 | 1.011 | 2.939 | PASS（tier1 4.5e-03） |
+| lite-t2-native（+原生 post 反向） | 0.712 | 2.142 | 0.970 | 2.930 | PASS（tier1 4.5e-03） |
+
+精度门卡：tier2 = vs fp32 torch 参考（自带 autograd）：relf ≤2e-2、5 组
+梯度 relw ≤5e-2（标量梯度对全 token 求和，必须相对比较）；tier1 = vs
+Tier-0 torch 孪生模块（同一 bf16 输入）：结构性错误（轴/布局/缺项）会到
+O(1) 量级，阈值 2e-2。两级都过才算数——快但不对直接出局。
+
+读数：
+
+- **lite-t2(-native) 的 e2e fwd+bwd 已与 full-cann 打平**（2.93–2.94 vs
+  2.92 ms）：triton pre 反向链 + aclnn/K3 post 反应在组件级到了 fused
+  算子同级；与 30-iter 实测（lite 快 ~2.7%）方向一致。
+- 剩余可见差距全在**前向**：e2e fwd 差 ~0.05–0.09 ms（post wrapper 输出
+  clone ~0.065 ms，方案 D）+ pre fwd 差 ~0.05 ms（npu_rms_norm/GEMM/三头
+  多 kernel vs fused 单 kernel，方案 C）。
+- lite-t2 与 lite-t2-native 的 e2e fwd+bwd 差异在噪声内（B=1 全链里 K3
+  post 反向与原生反向几乎同速）；原生反向的收益主要在 30-iter 实测口径
+  （~55 ms/iter）与其他 B/shape。
+
+### 优化方案矩阵（campaign 计划）
+
+| 方案 | 内容 | 借鉴来源 | 状态 |
+| --- | --- | --- | --- |
+| A | post 全原生 aclnn fwd+bwd | 主线 fused 路径 | = 基线行 lite-t2-native |
+| B | pre 反向减负：dcoeff GEMM 并入 megaK、autograd Function 的 python 开销剔除（~0.3 ms/次）、dx/dW 改 GEMM 形式 | Tier-2 手段延伸 | 待做 |
+| C | Ascend C 自定义 lite_pre 融合算子（无 sinkhorn 版 hc_pre：AIV cast→AIC GEMM→vector 三头+y） | vllm-ascend hc_pre 模板；tilelang-ascend 原型 | 待做 |
+| D | post wrapper 布局适配 clone 消除（B=1 时输入 permute 是零成本视图，仅输出 clone ~0.065 ms/次） | A5 实测 | 待做（主线同样受益） |
 
 ## 后续（tier 计划）
 
@@ -149,7 +197,7 @@ hc_pre fwd+bwd 3.76→**2.74 ms**（full 2.18）；数值 parity 同 Tier-1
 
 `bench_post_native_bwd.py`：aclnn 原生 fwd+bwd 0.581 ms vs K3 路径
 0.988 ms；**端到端实测 median 3949.6 vs 4005 ms（省 ~55ms/iter，1.4%）**，
-loss 5.8566 对齐；30-iter 真实训练未触发首调缺陷（B=1 免疫 + 训练时序
+loss 5.8566 对齐；30-iter 真实训练未触发首调缺陷（B=1 随机梯度 + 训练时序
 预热，见首调缺陷一节）。
 
 ## Tier 1：triton 融合 kernel（`MHC_LITE_TRITON=1`）
@@ -416,6 +464,10 @@ PYTHONPATH=<tilelang-ascend clone> LD_LIBRARY_PATH=<conda env>/lib:$LD_LIBRARY_P
   python experiments/mhc_lite/bench_sinkhorn.py
 # 完整 mhc_sinkhorn 端到端对比（pre/post/链路，fwd 与 fwd+bwd）
 python experiments/mhc_lite/bench_sinkhorn_e2e.py
+# 优化 campaign 基线（每变体独立进程）
+for v in full-cann lite-t0 lite-t2 lite-t2-native; do
+  python experiments/mhc_lite/bench_lite_e2e.py --variant $v
+done
 # mhc_post backward 稳定性：shape 矩阵 / 值混合（会生成 post_backward_case.pt）
 python experiments/mhc_lite/post_backward_shape_matrix.py
 python experiments/mhc_lite/post_backward_repro.py
