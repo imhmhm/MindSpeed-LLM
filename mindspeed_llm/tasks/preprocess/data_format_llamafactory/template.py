@@ -51,9 +51,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# one-shot flag: inline-vs-field thinking conflicts are common in mixed
+# datasets, so only the first occurrence is logged per process
+_reasoning_conflict_logged = False
+
 cur_file_dir = Path(__file__).absolute().parent
 
-TEMPLATES_DIR = os.path.join(cur_file_dir.parent.parent.parent, "configs/finetune/templates.json")
+TEMPLATES_DIR = os.path.join(cur_file_dir.parent.parent.parent.parent, "configs/finetune/templates.json")
 
 
 @dataclass
@@ -140,6 +144,39 @@ class Template:
     def get_thought_word_ids(self, tokenizer: "PreTrainedTokenizer") -> list[int]:
         r"""Get the token ids of thought words."""
         return tokenizer.encode(self.add_thought(), add_special_tokens=False)
+
+    def _merge_reasoning_fields(self, messages: list[dict[str, str]]) -> list[dict[str, str]]:
+        r"""Fold per-message ``reasoning_content`` fields into assistant content.
+
+        Adaptive per message: inline ``thought_words`` in content wins (the field
+        is ignored for that message); a non-empty field on a content carrying no
+        ``thought_words`` is wrapped and prepended. No-ops when no message
+        provides the field, so callers without mapped reasoning pay one pass of
+        dict lookups.
+        """
+        if not any(message.get("reasoning_content") for message in messages):
+            return messages
+
+        global _reasoning_conflict_logged
+        for message in messages:
+            if message.get("role") != Role.ASSISTANT.value:
+                continue
+            reasoning = message.get("reasoning_content")
+            if not reasoning:
+                continue
+            content = message.get("content") or ""
+            if self.thought_words[0].strip() in content or self.thought_words[1].strip() in content:
+                if not _reasoning_conflict_logged:
+                    _reasoning_conflict_logged = True
+                    logger.warning(
+                        "Assistant content already contains %s; inline thinking takes precedence "
+                        "over the reasoning_content field (further conflicts are not logged).",
+                        self.thought_words,
+                    )
+                continue
+            message["content"] = f"{self.thought_words[0]}{reasoning.strip()}{self.thought_words[1]}{content}"
+
+        return messages
 
     def _convert_elements_to_ids(self, tokenizer: "PreTrainedTokenizer", elements: "SLOTS") -> list[int]:
         r"""Convert elements to token ids."""
@@ -258,6 +295,7 @@ class ReasoningTemplate(Template):
         reserved_label_len: int = 1,
     ) -> tuple[list[int], list[int]]:
         messages = deepcopy(messages)
+        messages = self._merge_reasoning_fields(messages)
         if not self.preserve_thinking:
             for i in range(1, len(messages) - 2, 2):
                 messages[i]["content"] = self.remove_thought(messages[i]["content"])
@@ -288,6 +326,7 @@ class ReasoningTemplate(Template):
         discarding_history_cot: bool = False,
     ) -> list[tuple[list[int], list[int]]]:
         messages = deepcopy(messages)
+        messages = self._merge_reasoning_fields(messages)
 
         if self.enable_thinking is False:  # remove all cot
             for i in range(1, len(messages), 2):

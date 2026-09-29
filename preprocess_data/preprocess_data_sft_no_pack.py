@@ -9,7 +9,7 @@ import orjson
 import numpy as np
 from typing import Dict, List
 
-from mindspeed_llm.tasks.preprocess.data_format_llamafactory import get_model_template
+from mindspeed_llm.tasks.preprocess.data_format_llamafactory import get_model_template, ReasoningTemplate
 from mindspeed_llm.training.tokenizer import build_tokenizer
 
 from preprocess_data.convert_methods import InstructionDatasetAttr
@@ -43,6 +43,10 @@ class LlamaFactoryInstructionEncoder(object):
             args.prompt_type.strip(), args.prompt_type_path.strip(),
             enable_thinking=args.enable_thinking
         )
+        if isinstance(args.map_keys, dict) and "reasoning_tag" in args.map_keys \
+                and not isinstance(self.llama_factory_template, ReasoningTemplate):
+            print(f"[WARN] reasoning_tag is mapped but template {args.prompt_type} is not a ReasoningTemplate; "
+                  f"the reasoning field will be ignored.")
 
         self.ignored_label = IGNORED_LABEL
         self.train_on_inputs = False
