@@ -29,7 +29,7 @@ from datasets import load_dataset
 
 from megatron.core.datasets import indexed_dataset
 
-from mindspeed_llm.tasks.preprocess.data_format_llamafactory import get_model_template
+from mindspeed_llm.tasks.preprocess.data_format_llamafactory import get_model_template, ReasoningTemplate
 from mindspeed_llm.tasks.posttrain.utils import convert_token_to_id
 from .decoder_packed_mtf_dataset import _infer_seqlen
 
@@ -453,6 +453,10 @@ class LlamaFactoryInstructionHandler(BaseDatasetHandler):
         self.ignored_label = -100
         self.is_multi_turn = True
         self.llama_factory_template = get_model_template(args.prompt_type.strip(), args.prompt_type_path.strip(), args.enable_thinking, args.reasoning_effort, args.drop_thinking)
+        if isinstance(args.map_keys, dict) and "reasoning_tag" in args.map_keys \
+                and not isinstance(self.llama_factory_template, ReasoningTemplate):
+            logger.warning("reasoning_tag is mapped but template %s is not a ReasoningTemplate; "
+                           "the reasoning field will be ignored.", args.prompt_type)
         self.cutoff_len = 100000 if args.seq_length is None else args.seq_length
 
     def _format_msg(self, sample):
