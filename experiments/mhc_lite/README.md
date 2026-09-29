@@ -146,7 +146,7 @@ O(1) 量级，阈值 2e-2。两级都过才算数——快但不对直接出局�
 | B | pre 反向减负：dcoeff 小 GEMM（[bs,16]@[16,24]）折进 megaK kernel（寄存器 [2,16,24] 乘加）+ dlogits 单次 cast 复用 | Tier-2 手段延伸 | pre fwd+bwd 2.14→2.04 ms（−0.10）；kernel 级归因：独立 matmul 0.023 ms，折入仅 +0.006 ms，其余为派发/分配开销 |
 | A | post 全原生 aclnn fwd+bwd | 主线 fused 路径 | e2e fwd+bwd −0.16（2.94→2.78 vs lite-t2） |
 | D | post 直连算子 + 输出视图（免 wrapper 的输出 clone；B=1 时输入 permute 本就是零成本视图） | A5 实测 | e2e fwd −0.055（≈clone 成本）；反向无收益——clone 的 vjp 是恒等映射（不发生梯度拷贝），实测 fwd+bwd 持平。B>1 时输出是非连续视图，主线采用前需过 pipeline 冒烟 |
-| C | Ascend C 自定义 lite_pre 融合算子（无 sinkhorn 版 hc_pre：AIV cast→AIC GEMM→vector 三头+y） | vllm-ascend hc_pre 模板；tilelang-ascend 原型 | 待做；剩余差距即 pre fwd 0.70 vs full 0.66 |
+| C | Ascend C 自定义 lite_pre 融合算子（无 sinkhorn 版 hc_pre：AIV cast→AIC GEMM→vector 三头+y） | vllm-ascend hc_pre 模板；tilelang-ascend 原型 | tilelang 原型已做（见下节）：单 kernel 0.424 ms、精度全部低于现行链噪声底，但 e2e 0.648 vs 现行链 0.574——W' 重建 + launch 间隙吃掉 kernel 收益；进 0.4 ms 须手写 Ascend C 进 CANN ops |
 
 结论：**A+B+D（lite-t3）e2e fwd+bwd 2.768 ms，比 full-cann fused 2.923
 快 5.3%**，两级门卡与 `triton_parity_test.py` 全 PASS。与 30-iter 实测
@@ -339,6 +339,56 @@ tilelang 仓自称的 "vs CANN 5.98×" 基线是 eager bmm；**与 aclnn 融合�
 对比它是慢 7~10× 的**——aclnn 的 MicroAPI 单遍向量路径在 post 这种访存
 受限算子上仍是上限，tilelang 中间层换不来超越。
 
+### tilelang 2-D 融合 lite_pre（`bench_tilelang_lite_pre.py`，方案 C 原型）
+
+把 pre 段非 GEMM 部分（RMS 平方和、三头、y AXPY）折叠进单个二维
+[ROWS=8, W] 向量核：每个向量核一次处理 8 个 token，摊薄逐 op launch
+开销。利用 RMSNorm 线性 `xn@W^T = rstd*(x@(W*gamma)^T)` 让 GEMM 直接
+吃 x（免 32 MB xn 物化），额外代价仅 W'=W*gamma 每步一次广播乘（预分配
+缓冲 out=，0.028 ms）。GEMM 输出按 8 通道 pad（pre 0:4 / post 8:12 /
+res 16:40 of [sb,48]），核内所有 UB 窗口 32B 对齐。
+
+精度（vs fp32 torch 参考，S=4096 / hc=4 / h=1024，bf16 输入）：
+
+| 输出 | tilelang 2-D | 现行 triton 链（即噪声底） |
+| --- | --- | --- |
+| y | 3.0e-02 | 4.3e-02 |
+| h_pre | **7.2e-05** | 2.0e-03 |
+| h_post | 1.4e-04 | 1.1e-04 |
+| h_res | 4.5e-05 | 4.2e-05 |
+
+h_pre 好 28×：头在核内用 raw bf16 GEMM 结果的 fp32 计算，省掉现行链
+xn 的 bf16 舍入。
+
+计时（同 shape）：
+
+| 项 | ms |
+| --- | --- |
+| W' = W*gamma 广播乘 | 0.028 |
+| GEMM（不含 W'） | 0.035 |
+| 2-D 融合 kernel 单独 | 0.424 |
+| 现行链（rms+GEMM+K1ab） | **0.574**（0.570–0.574） |
+| tilelang 全链（W'+GEMM+kernel+host 混合） | 0.648 |
+| aclnn mhc_pre_sinkhorn fwd（full 语义，参照） | 0.636（0.632–0.636） |
+
+结论：**kernel 级融合成立但 e2e 不成立**——0.424 ms 覆盖 rms+三头+y，
+优于现行链非 GEMM 部分（~0.52 ms），但 W' 重建与多段 launch 间隙
+~0.14 ms 把 e2e 推到比现行链慢 13%、与 aclnn 参照持平。tilelang 逐
+tile 原语每步仍是独立向量指令，h=1024 到不了带宽（与 V10 的 h 依赖
+结论一致）；要低于 0.4 ms 须按 vllm-ascend 模板手写 Ascend C 算子进
+CANN ops（AIV cast→AIC GEMM→vector 三段流水），tilelang 层无法达成。
+
+开发中定位并绕过 4 个 tilelang-ascend codegen 静默错误（全部最小化
+复现在 `probe_tilelang_miscompiles.py`，broken/working 成对，可直接
+用于上游 bug 报告）：
+
+| # | 模式 | 症状 | 规避 |
+| --- | --- | --- | --- |
+| P1 | 二元逐元素 op 的操作数是 [ROWS,1] 列向量 | 散布错 lane | 先 `T.tile.broadcast(..., axis=1)` 再乘 |
+| P2 | `T.tile.axpy(dst, src, buf[0,k])` 元素标量 | 第 0 行精确，其余行错 3–5% | broadcast+mul+add；另 [ROWS,8] bf16 UB 行仅 16B，低于向量核 32B 对齐，需经 ≥48 通道读中转 |
+| P3 | mul 的操作数是宽缓冲的窗口视图 | 多数行清零/垃圾 | 每窗口先 `T.copy` 进专用缓冲 |
+| P4 | add 目标是宽累加器的列切片区域 | 第 1 行起损坏 | 只做全宽累加（y 段因此 chunk=h=1024） |
+
 ### sinkhorn（full MHC res 头）各实现对比（`bench_sinkhorn.py`）
 
 同口径对比：logits [4096,16] fp32 → softmax(s·l+b)+eps → 初始列归一 →
@@ -453,6 +503,11 @@ python experiments/mhc_lite/bench_compile.py
 # tilelang mhc_post 三方对照（需源码构建 tilelang-ascend，见上节）
 PYTHONPATH=<tilelang-ascend clone> LD_LIBRARY_PATH=<conda env>/lib:$LD_LIBRARY_PATH \
   python experiments/mhc_lite/bench_tilelang_post.py
+# tilelang 2-D 融合 lite_pre（方案 C 原型）+ codegen 错误回归探针
+PYTHONPATH=<tilelang-ascend clone> LD_LIBRARY_PATH=<conda env>/lib:$LD_LIBRARY_PATH \
+  python experiments/mhc_lite/bench_tilelang_lite_pre.py
+PYTHONPATH=<tilelang-ascend clone> LD_LIBRARY_PATH=<conda env>/lib:$LD_LIBRARY_PATH \
+  python experiments/mhc_lite/probe_tilelang_miscompiles.py
 # sinkhorn 各实现对比（tilelang 段同样需要源码构建，缺失时自动跳过）
 PYTHONPATH=<tilelang-ascend clone> LD_LIBRARY_PATH=<conda env>/lib:$LD_LIBRARY_PATH \
   python experiments/mhc_lite/bench_sinkhorn.py
