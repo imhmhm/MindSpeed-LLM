@@ -1,9 +1,9 @@
 # Copyright (c) 2026, HUAWEI CORPORATION.  All rights reserved.
 """Time the native aclnnMhcPost backward vs the triton K3 replacement.
 
-seed=2 values are known-good for the value-dependent aclnnMhcPostBackward
-defect (see post_backward_repro.py); the timing is representative of the
-mainline full-MHC path which relies on this backward.
+B=1 throughout: aclnnMhcPostBackward's first-call cold tiling failure only
+bites B>=2 (see post_backward_order_probe.py), so the native backward is
+benched the way the mainline full-MHC path uses it.
 """
 
 import sys

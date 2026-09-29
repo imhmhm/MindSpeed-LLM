@@ -1,5 +1,12 @@
 # Copyright (c) 2026, HUAWEI CORPORATION.  All rights reserved.
-"""Pinpoint which input values break aclnnMhcPostBackward (seed=1 case)."""
+"""Mix good/bad value cases through aclnnMhcPostBackward in one process.
+
+Saves the S=512,B=2 seed-1/seed-2 cases to post_backward_case.pt and runs
+the bad case, the good case, all pairwise mixes and all leave-one-out
+mixes. bad-all is always the process's FIRST backward call, and that
+ordering -- not the values -- is what makes it fail: the failure is a
+first-call cold tiling init at B>=2, see post_backward_order_probe.py.
+"""
 
 import argparse
 import sys

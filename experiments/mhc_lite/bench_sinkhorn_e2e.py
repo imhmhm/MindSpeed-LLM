@@ -36,8 +36,9 @@ import triton.language as tl  # noqa: E402
 from mindspeed_llm.ops.npu_mhc import mhc_post_ascend, mhc_pre_sinkhorn_ascend  # noqa: E402
 from mindspeed_llm.ops.triton.mhc_lite_heads import _launch  # noqa: E402
 
-# seed=2 keeps the value-dependent aclnnMhcPostBackward on its known-good side
-# (post_backward_repro.py); the timing is representative of the mainline path.
+# B=1 here: aclnnMhcPostBackward's first-call cold tiling failure only bites
+# B>=2 (post_backward_order_probe.py), so the aclnn chains can use the native
+# backward freely.
 torch.manual_seed(2)
 torch_npu.npu.set_device(0)
 DEV = torch.device('npu:0')
