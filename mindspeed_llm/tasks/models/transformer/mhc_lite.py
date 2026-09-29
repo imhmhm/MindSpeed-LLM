@@ -32,7 +32,7 @@ from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.transformer import TransformerConfig, ModuleSpec, build_module
 
 from mindspeed_llm.core.tensor_parallel.layers import LinearNoTP
-from mindspeed_llm.ops.npu_mhc import mhc_post_ascend
+from mindspeed_llm.ops.npu_mhc import _mhc_ops, mhc_post_ascend
 from mindspeed_llm.ops.triton.mhc_lite_heads import (
     TRITON_AVAILABLE,
     lite_heads_y_forward,
@@ -44,6 +44,28 @@ from mindspeed_llm.ops.triton.mhc_lite_heads import (
 
 def _triton_lite_enabled():
     return TRITON_AVAILABLE and os.environ.get('MHC_LITE_TRITON') == '1'
+
+
+def _post_direct_enabled():
+    return os.environ.get('MHC_LITE_POST_DIRECT') == '1'
+
+
+def _mhc_post_call(h_out, x, h_post, h_res):
+    """MHC post forward with a scheme-D direct path: call the aclnn op on
+    natively laid-out tensors and return a permuted view. At B=1 the input
+    permutes are free contiguous views, so the only work dropped is the
+    wrapper's output clone (a full [s,b,e,h] copy); at B>1 inputs still go
+    through .contiguous() as usual."""
+    if _post_direct_enabled():
+        ops = _mhc_ops()
+        out = ops.mhc_post(
+            x.permute(1, 0, 2, 3).contiguous(),
+            h_res.permute(1, 0, 2, 3).contiguous(),
+            h_out.permute(1, 0, 2).contiguous(),
+            h_post.permute(1, 0, 2).contiguous(),
+        )
+        return out.permute(1, 0, 2, 3)
+    return mhc_post_ascend(h_out, x, h_post, h_res)
 
 
 @dataclass
@@ -71,17 +93,18 @@ def _permutation_mats_flat(n: int) -> torch.Tensor:
 class _MhcPostFn(torch.autograd.Function):
     """Fused Ascend mhc_post forward with an explicit backward.
 
-    out_j = h_post_j * h_out + sum_i h_res[i, j] * x_i. The aclnnMhcPostBackward
-    kernel is unstable on some in-range coefficient values (internal launch
-    failure), so gradients are recomputed explicitly: fused triton kernel when
-    enabled, fp32 torch reductions otherwise.
+    out_j = h_post_j * h_out + sum_i h_res[i, j] * x_i. Gradients are
+    recomputed explicitly because the aclnnMhcPostBackward process-first call
+    can hit a tiling cold-init launch failure (characterized in
+    experiments/mhc_lite/README.md): fused triton kernel when enabled, fp32
+    torch reductions otherwise.
     """
 
     @staticmethod
     def forward(ctx, h_out, x, h_post, h_res):
         ctx.save_for_backward(h_out, x, h_post, h_res)
         ctx.use_triton = _triton_lite_enabled()
-        return mhc_post_ascend(h_out, x, h_post, h_res)
+        return _mhc_post_call(h_out, x, h_post, h_res)
 
     @staticmethod
     def backward(ctx, grad):
@@ -133,18 +156,20 @@ class _LitePreTritonFn(torch.autograd.Function):
         s, b, e, h = ctx.x_shape
         sb = s * b
 
-        dcoeff = torch.matmul(grad_h_res.reshape(sb, e * e).float(), ctx.perm_t)
         dlogits, d_scale, d_base = lite_pre_backward(
             grad_y.reshape(sb, h),
             xf.view(sb, e, h),
             grad_h_post.reshape(sb, e).float(),
-            dcoeff,
+            grad_h_res.reshape(sb, e * e).contiguous(),
+            ctx.perm_t,
             logits,
             scale.float(),
             base.float(),
         )
-        grad_weight = torch.matmul(dlogits.t().to(xn.dtype), xn).to(weight.dtype)
-        d_xn = torch.matmul(dlogits.to(weight.dtype), weight)
+        dlogits_typed = dlogits.to(xn.dtype)
+        grad_weight = torch.matmul(dlogits_typed.t(), xn).to(weight.dtype)
+        d_xn = torch.matmul(dlogits_typed, weight) if weight.dtype == xn.dtype \
+            else torch.matmul(dlogits.to(weight.dtype), weight)
         d_x_rms, d_gamma = torch_npu.npu_rms_norm_backward(d_xn, xf, gamma.type_as(xf), rstd)
         grad_x = lite_grad_x(grad_y.reshape(sb, h), h_pre, d_x_rms.view(sb, e, h))
         return (
@@ -214,8 +239,9 @@ class MHCLite(MegatronModule):
             self.use_cann_post = False
         if os.environ.get('MHC_LITE_TORCH_POST') == '1':
             self.use_cann_post = False
-        # native aclnn backward is faster but value-dependently unstable
-        # (see experiments/mhc_lite/post_backward_repro.py)
+        # native aclnn backward is faster; its process-first call can fail with
+        # a tiling cold-init (characterized in experiments/mhc_lite/README.md),
+        # which training call order never hits
         self.use_native_post_bwd = os.environ.get('MHC_LITE_NATIVE_POST_BWD') == '1'
         self.use_triton_pre = _triton_lite_enabled()
 
@@ -275,7 +301,7 @@ class MHCLite(MegatronModule):
         # the Ascend op only accepts fp16/bf16 streams
         if self.use_cann_post and x.dtype in (torch.bfloat16, torch.float16):
             if self.use_native_post_bwd:
-                y = mhc_post_ascend(x, residual, post, comb)
+                y = _mhc_post_call(x, residual, post, comb)
                 return y.type_as(x)
             y = _MhcPostFn.apply(x, residual, post, comb)
             return y.type_as(x)
