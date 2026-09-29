@@ -253,16 +253,53 @@ lite 的三头结构同源，但其"权重静态"设定不含我们的动态 per
 诉求的方向。wrapper 布局适配的 3.6ms/iter 与 fp32 GEMM 精度开关是两个
 立即可落地的主线优化点。
 
-### tilelang 直测受阻（环境限制）
+### tilelang 直测（`bench_tilelang_post.py`，源码构建后补齐）
 
-`bench_tilelang_post.py` 已就绪：在本仓 shape（n=4096, hc=4, h=1024）跑
-tilelang V10 纯 Vector kernel vs eager bmm vs aclnn 裸调三方对照——注意
-tilelang 仓自称的 "vs CANN 5.98×" 基线是 eager bmm，与 aclnn 融合算子的
-对照社区尚未报过。未能执行的原因：pypi 的 tilelang-ascend 0.1.4 wheel 需
-glibc 2.38（本机 2.34）；GitHub release 的 0.1.1.10 ubuntu20.4 wheel 经
-本机网络代理两次获取失败（一次恰好截断在 20MiB 整、一次 404，代理拒绝
-Range 续传）。在无该限制的网络下装好 0.1.1.10 wheel 后直接运行即可
-（需 conda libstdc++ 前置 LD_LIBRARY_PATH，见脚本头注释）。
+tilelang-ascend 在本机只能源码构建：pypi 0.1.4 wheel 需 glibc 2.38
+（本机 2.34），GitHub release wheel 被网络代理截断（20MiB 上限）。
+源码构建（`github/tilelang-ascend` @ascendc_pto，`USE_ASCEND=true python
+setup.py build_ext --inplace`）产物只依赖 GLIBC_2.34/GLIBCXX_3.4.26，
+经 `PYTHONPATH=<clone> LD_LIBRARY_PATH=<conda>/lib` 直接可用，无需安装。
+
+三方对照（n=4096, hc=4, bf16，本机 CANN 9.1.1）：
+
+| shape | tilelang V10 | eager bmm | aclnn `mhc_post` 裸调 |
+| --- | --- | --- | --- |
+| h=1024（本仓 0.5B shape） | 1.086 ms | 1.207 ms | **0.114 ms** |
+| h=2560（tilelang 仓文档 shape） | 0.801 ms | 3.041 ms | **0.168 ms** |
+
+tilelang 仓自称的 "vs CANN 5.98×" 基线是 eager bmm；**与 aclnn 融合算子
+对比它是慢 7~10× 的**——aclnn 的 MicroAPI 单遍向量路径在 post 这种访存
+受限算子上仍是上限，tilelang 中间层换不来超越。
+
+### sinkhorn（full MHC res 头）各实现对比（`bench_sinkhorn.py`）
+
+同口径对比：logits [4096,16] fp32 → softmax(s·l+b)+eps → 初始列归一 →
+19×(行归一,列归一) → out [4096,16]，即 `torch_hc_split_sinkhorn` res 段：
+
+| 实现 | ms | maxdiff vs fp64 |
+| --- | --- | --- |
+| eager torch 循环（主线回退形态） | 3.017 | 0 |
+| aot_eager | 2.991 | 0 |
+| inductor（npu triton codegen） | 2.987 | 0 |
+| torchair（CANN GE 图） | 2.994 | 0 |
+| tilelang UB kernel（源码构建，双 V 核） | 0.735 | 1.2e-07 |
+| **triton 融合 kernel**（16 值驻留寄存器） | **0.227** | 1.2e-07 |
+| （参照）aclnnMhcPreSinkhorn 整算子 fwd | 0.633 | 含 norm+GEMM+3 头+sinkhorn+y |
+
+结论：
+- **sinkhorn 单算最快是 triton 融合 kernel（0.227ms，eager 的 13×）**：
+  每 token 的 16 个值全程驻留寄存器，38 次归一化全是寄存器内逐元素运算，
+  显存只碰一次读一次写；
+- **torch.compile 三后端对这个迭代小张量全部无效**（都 ~3ms）：dynamo/
+  inductor/GE 图都无法把 19 次 `sum+div` 循环融合成单 kernel，每次迭代
+  仍是独立小 kernel；
+- tilelang 版 0.735ms：tile 原语每步是独立向量指令（约 580 条 [256,8]
+  tile op），无寄存器级融合，且 fp32 行宽须 pad 到 8 通道（32B 对齐），
+  一半算力花在 pad 通道上——比 triton 慢 3.2×。tilelang 的甜区是大 tile
+  数据流（如 mhc_post），不在这种 16 宽迭代小矩阵；
+- aclnn 融合算子里 sinkhorn 被摊销（整算子含全部 pre 计算才 0.63ms），
+  印证"迭代进 kernel"是正解（vllm-ascend 同路线）。
 
 ## 复现
 
@@ -278,6 +315,12 @@ python experiments/mhc_lite/bench_pre_bwd_pieces.py
 python experiments/mhc_lite/bench_full_mhc_ref.py
 # torch.compile 三后端 naive 实测
 python experiments/mhc_lite/bench_compile.py
+# tilelang mhc_post 三方对照（需源码构建 tilelang-ascend，见上节）
+PYTHONPATH=<tilelang-ascend clone> LD_LIBRARY_PATH=<conda env>/lib:$LD_LIBRARY_PATH \
+  python experiments/mhc_lite/bench_tilelang_post.py
+# sinkhorn 各实现对比（tilelang 段同样需要源码构建，缺失时自动跳过）
+PYTHONPATH=<tilelang-ascend clone> LD_LIBRARY_PATH=<conda env>/lib:$LD_LIBRARY_PATH \
+  python experiments/mhc_lite/bench_sinkhorn.py
 # mhc_post backward 稳定性矩阵 / 值域复现（会生成 post_backward_case.pt）
 python experiments/mhc_lite/post_backward_shape_matrix.py
 python experiments/mhc_lite/post_backward_repro.py
