@@ -22,6 +22,9 @@ Variants:
   lite-t2-native  + MHC_LITE_NATIVE_POST_BWD=1 (aclnn native post backward;
                   warmed up first by one B=1 random-gradient call, the shape/
                   grad pattern that passes the first-call cold tiling init)
+  lite-t2-direct  + MHC_LITE_POST_DIRECT=1 (scheme D: aclnn post called on
+                  native layouts, output returned as a view, no wrapper clone)
+  lite-t3         TRITON + NATIVE_POST_BWD + POST_DIRECT (A+D stacked)
 """
 
 import argparse
@@ -177,7 +180,8 @@ class _EnvCleared:
     """Temporarily drop the lite env toggles (module init and _MhcPostFn read
     them), so a Tier-0 torch reference module can coexist with a variant."""
 
-    KEYS = ('MHC_LITE_TRITON', 'MHC_LITE_NATIVE_POST_BWD', 'MHC_LITE_TORCH_POST')
+    KEYS = ('MHC_LITE_TRITON', 'MHC_LITE_NATIVE_POST_BWD', 'MHC_LITE_POST_DIRECT',
+            'MHC_LITE_TORCH_POST')
 
     def __enter__(self):
         self.saved = {k: os.environ.pop(k, None) for k in self.KEYS}
@@ -379,7 +383,8 @@ def run_full(s, b):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--variant', required=True,
-                        choices=['full-cann', 'lite-t0', 'lite-t2', 'lite-t2-native'])
+                        choices=['full-cann', 'lite-t0', 'lite-t2', 'lite-t2-native',
+                                 'lite-t2-direct', 'lite-t3'])
     parser.add_argument('--shape', default=f'{S}x{B}', help='sxb')
     args = parser.parse_args()
 
@@ -387,12 +392,13 @@ def main():
     if args.variant == 'full-cann':
         run_full(s, b)
         return
-    if args.variant == 'lite-t2':
+    if args.variant.startswith('lite-t2') or args.variant == 'lite-t3':
         os.environ['MHC_LITE_TRITON'] = '1'
-    elif args.variant == 'lite-t2-native':
-        os.environ['MHC_LITE_TRITON'] = '1'
+    if args.variant in ('lite-t2-native', 'lite-t3'):
         os.environ['MHC_LITE_NATIVE_POST_BWD'] = '1'
-    if args.variant == 'lite-t2-native':
+    if args.variant in ('lite-t2-direct', 'lite-t3'):
+        os.environ['MHC_LITE_POST_DIRECT'] = '1'
+    if args.variant in ('lite-t2-native', 'lite-t3'):
         warm_native_post(torch.bfloat16)
     run_lite(args.variant, s, b)
 

@@ -118,45 +118,39 @@ post 侧若直接用原生反向（`MHC_LITE_NATIVE_POST_BWD=1` 开关，默认�
 （sinkhorn vs 单 softmax、无学习 gamma），不能直接复用；其 1.6 ms/次差距
 （≈76 ms/iter）是剩余差距的大头，需更深融合或 CANN 侧 lite 算子。
 
-## 优化 campaign 基线（`bench_lite_e2e.py`）
+## 优化 campaign 基线与方案矩阵（`bench_lite_e2e.py`）
 
 组件级 e2e harness，优化实验的统一口径：同一模块链（pre 段、pre+post 全链）
 的 fwd 与 fwd+bwd 计时 + 两级精度门卡。S=4096 B=1 bf16，每变体独立子进程
-（env 开关在模块 init / 调用点读取）；run-to-run 抖动 ~1–4%（lite-t2 首轮
-曾整体偏慢 ~8%，以复跑为准）。
+（env 开关在模块 init / 调用点读取）；跨进程噪声 ~±0.05 ms（偶发离群更大），
+下表为 2–3 次复跑的中位数。
 
 | 变体 | pre fwd | pre fwd+bwd | e2e fwd | e2e fwd+bwd | 门卡 |
 | --- | --- | --- | --- | --- | --- |
-| full-cann（aclnn fused 全链，full-MHC 语义） | 0.663 | 2.145 | 0.918 | 2.925 | 自有参考（informational） |
-| lite-t0（torch 链） | 0.892 | 2.422 | 1.212 | 3.706 | PASS |
-| lite-t2（`MHC_LITE_TRITON=1`） | 0.710 | 2.121 | 1.011 | 2.939 | PASS（tier1 4.5e-03） |
-| lite-t2-native（+原生 post 反向） | 0.712 | 2.142 | 0.970 | 2.930 | PASS（tier1 4.5e-03） |
+| full-cann（aclnn fused 全链，full-MHC 语义） | 0.663 | 2.144 | 0.919 | 2.923 | 自有参考（informational） |
+| lite-t0（torch 链） | 0.892 | 2.431 | 1.203 | 3.676 | PASS |
+| lite-t2（triton，含方案 B） | 0.694 | 2.084 | 1.008 | 2.942 | PASS（tier1 4.5e-03） |
+| lite-t2-native（+方案 A） | 0.696 | 2.042 | 0.981 | 2.784 | PASS（tier1 4.5e-03） |
+| lite-t2-direct（+方案 D） | 0.725 | 2.196 | 0.996 | 2.968 | PASS（tier1 4.5e-03） |
+| **lite-t3（A+B+D 全叠加）** | 0.704 | 2.068 | **0.926** | **2.768** | PASS（tier1 4.5e-03） |
 
 精度门卡：tier2 = vs fp32 torch 参考（自带 autograd）：relf ≤2e-2、5 组
 梯度 relw ≤5e-2（标量梯度对全 token 求和，必须相对比较）；tier1 = vs
 Tier-0 torch 孪生模块（同一 bf16 输入）：结构性错误（轴/布局/缺项）会到
 O(1) 量级，阈值 2e-2。两级都过才算数——快但不对直接出局。
 
-读数：
+方案实施与实测（叠加顺序 B → A/D）：
 
-- **lite-t2(-native) 的 e2e fwd+bwd 已与 full-cann 打平**（2.93–2.94 vs
-  2.92 ms）：triton pre 反向链 + aclnn/K3 post 反应在组件级到了 fused
-  算子同级；与 30-iter 实测（lite 快 ~2.7%）方向一致。
-- 剩余可见差距全在**前向**：e2e fwd 差 ~0.05–0.09 ms（post wrapper 输出
-  clone ~0.065 ms，方案 D）+ pre fwd 差 ~0.05 ms（npu_rms_norm/GEMM/三头
-  多 kernel vs fused 单 kernel，方案 C）。
-- lite-t2 与 lite-t2-native 的 e2e fwd+bwd 差异在噪声内（B=1 全链里 K3
-  post 反向与原生反向几乎同速）；原生反向的收益主要在 30-iter 实测口径
-  （~55 ms/iter）与其他 B/shape。
-
-### 优化方案矩阵（campaign 计划）
-
-| 方案 | 内容 | 借鉴来源 | 状态 |
+| 方案 | 内容 | 借鉴来源 | 实测效果 |
 | --- | --- | --- | --- |
-| A | post 全原生 aclnn fwd+bwd | 主线 fused 路径 | = 基线行 lite-t2-native |
-| B | pre 反向减负：dcoeff GEMM 并入 megaK、autograd Function 的 python 开销剔除（~0.3 ms/次）、dx/dW 改 GEMM 形式 | Tier-2 手段延伸 | 待做 |
-| C | Ascend C 自定义 lite_pre 融合算子（无 sinkhorn 版 hc_pre：AIV cast→AIC GEMM→vector 三头+y） | vllm-ascend hc_pre 模板；tilelang-ascend 原型 | 待做 |
-| D | post wrapper 布局适配 clone 消除（B=1 时输入 permute 是零成本视图，仅输出 clone ~0.065 ms/次） | A5 实测 | 待做（主线同样受益） |
+| B | pre 反向减负：dcoeff 小 GEMM（[bs,16]@[16,24]）折进 megaK kernel（寄存器 [2,16,24] 乘加）+ dlogits 单次 cast 复用 | Tier-2 手段延伸 | pre fwd+bwd 2.14→2.04 ms（−0.10）；kernel 级归因：独立 matmul 0.023 ms，折入仅 +0.006 ms，其余为派发/分配开销 |
+| A | post 全原生 aclnn fwd+bwd | 主线 fused 路径 | e2e fwd+bwd −0.16（2.94→2.78 vs lite-t2） |
+| D | post 直连算子 + 输出视图（免 wrapper 的输出 clone；B=1 时输入 permute 本就是零成本视图） | A5 实测 | e2e fwd −0.055（≈clone 成本）；反向无收益——clone 的 vjp 是恒等映射（不发生梯度拷贝），实测 fwd+bwd 持平。B>1 时输出是非连续视图，主线采用前需过 pipeline 冒烟 |
+| C | Ascend C 自定义 lite_pre 融合算子（无 sinkhorn 版 hc_pre：AIV cast→AIC GEMM→vector 三头+y） | vllm-ascend hc_pre 模板；tilelang-ascend 原型 | 待做；剩余差距即 pre fwd 0.70 vs full 0.66 |
+
+结论：**A+B+D（lite-t3）e2e fwd+bwd 2.768 ms，比 full-cann fused 2.923
+快 5.3%**，两级门卡与 `triton_parity_test.py` 全 PASS。与 30-iter 实测
+（lite 快 ~2.7%）方向一致；组件级口径下 lite 已越过 fused 算子基线。
 
 ## 后续（tier 计划）
 
@@ -464,8 +458,8 @@ PYTHONPATH=<tilelang-ascend clone> LD_LIBRARY_PATH=<conda env>/lib:$LD_LIBRARY_P
   python experiments/mhc_lite/bench_sinkhorn.py
 # 完整 mhc_sinkhorn 端到端对比（pre/post/链路，fwd 与 fwd+bwd）
 python experiments/mhc_lite/bench_sinkhorn_e2e.py
-# 优化 campaign 基线（每变体独立进程）
-for v in full-cann lite-t0 lite-t2 lite-t2-native; do
+# 优化 campaign 基线与方案变体（每变体独立进程；跨进程噪声 ~±0.05ms，取多次中位数）
+for v in full-cann lite-t0 lite-t2 lite-t2-native lite-t2-direct lite-t3; do
   python experiments/mhc_lite/bench_lite_e2e.py --variant $v
 done
 # mhc_post backward 稳定性：shape 矩阵 / 值混合（会生成 post_backward_case.pt）

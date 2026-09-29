@@ -50,9 +50,11 @@ t = bench(lambda: lite_heads_y_forward(logits, x, scale, base, perm_t))
 print(f'K1 heads+y fwd (K1a+K1b)  : {t:.3f} ms')
 
 ghpost = torch.randn(BS, 4, device=DEV, dtype=torch.float32)
-dcoeff = torch.randn(BS, NP, device=DEV, dtype=torch.float32)
+ghres = torch.randn(BS, E * E, device=DEV, dtype=torch.float32)
 g = torch.randn(BS, D, device=DEV, dtype=torch.bfloat16)
-t = bench(lambda: lite_pre_backward(g, x, ghpost, dcoeff, logits, scale, base))
+t = bench(lambda: torch.matmul(ghres, perm_t))
+print(f'dcoeff matmul (folded)    : {t:.3f} ms')
+t = bench(lambda: lite_pre_backward(g, x, ghpost, ghres, perm_t, logits, scale, base))
 print(f'megaK pre bwd (+reduce)   : {t:.3f} ms')
 
 d_x_rms = torch.randn(BS, E, D, device=DEV, dtype=torch.bfloat16)

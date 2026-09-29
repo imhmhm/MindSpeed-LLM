@@ -144,7 +144,8 @@ if TRITON_AVAILABLE:
         g_ptr,  # [bs, D] grad of the pre output y
         x_ptr,  # [bs, 4, D] bf16 streams
         ghpost_ptr,  # [bs, 4] fp32
-        dcoeff_ptr,  # [bs, NP] fp32 grad wrt the softmax coefficients
+        ghres_ptr,  # [bs, EE] fp32 grad wrt the mixed permutation matrices
+        perm_t_ptr,  # [EE, NP] fp32 permutation table
         logits_ptr,  # [bs, 32] fp32 saved from forward
         scale_ptr,  # [3] fp32
         base_ptr,  # [32] fp32
@@ -154,6 +155,7 @@ if TRITON_AVAILABLE:
         bs,
         D: tl.constexpr,
         NP: tl.constexpr,
+        EE: tl.constexpr,
         GROUP: tl.constexpr,
         BLOCK_D: tl.constexpr,
     ):
@@ -216,7 +218,13 @@ if TRITON_AVAILABLE:
         zmax = tl.max(z, axis=1)
         e = tl.exp(z - zmax[:, None])
         coeff = e / tl.sum(e, axis=1)[:, None]  # [GROUP, NP]
-        dcoeff = tl.load(dcoeff_ptr + rows[:, None] * NP + ar_n[None, :], mask=mask[:, None], other=0.0)
+        # dcoeff = ghres @ perm_t, the softmax-coefficient grad, folded in here
+        # so no separate tiny GEMM kernel is needed
+        ar_ee = tl.arange(0, EE)
+        ghres = tl.load(ghres_ptr + rows[:, None] * EE + ar_ee[None, :],
+                        mask=mask[:, None], other=0.0).to(tl.float32)
+        perm_t = tl.load(perm_t_ptr + ar_ee[:, None] * NP + ar_n[None, :])  # [EE, NP]
+        dcoeff = tl.sum(ghres[:, :, None] * perm_t[None, :, :], axis=1)  # [GROUP, NP]
         sdot = tl.sum(dcoeff * coeff, axis=1)  # [GROUP]
         dzc = coeff * (dcoeff - sdot[:, None])
         tl.store(dlogits_ptr + row_off[:, None] + (8 + ar_n)[None, :], dzc * s2, mask=mask[:, None])
@@ -410,7 +418,8 @@ def lite_pre_backward(
     g: torch.Tensor,  # [bs, D] grad of y
     x: torch.Tensor,  # [bs, 4, D]
     ghpost: torch.Tensor,  # [bs, 4] fp32
-    dcoeff: torch.Tensor,  # [bs, NP] fp32
+    ghres: torch.Tensor,  # [bs, e*e] fp32 grad wrt the mixed permutation matrices
+    perm_t: torch.Tensor,  # [e*e, NP] fp32 contiguous
     logits: torch.Tensor,  # [bs, 32] fp32
     scale: torch.Tensor,  # [3] fp32
     base: torch.Tensor,  # [32] fp32
@@ -429,8 +438,8 @@ def lite_pre_backward(
     dbase = torch.empty((32,), device=logits.device, dtype=torch.float32)
     _launch(
         lite_pre_bwd_kernel, ('pre_bwd', bs, d, x.dtype), (nprog,),
-        (g, x, ghpost, dcoeff, logits, scale, base, dlogits, tmp_dscale, tmp_dbase, bs),
-        {'D': d, 'NP': np_, 'GROUP': group, 'BLOCK_D': d},
+        (g, x, ghpost, ghres, perm_t, logits, scale, base, dlogits, tmp_dscale, tmp_dbase, bs),
+        {'D': d, 'NP': np_, 'EE': ghres.shape[-1], 'GROUP': group, 'BLOCK_D': d},
     )
     _launch(
         lite_heads_bwd_reduce_kernel, ('bwd_reduce', nprog), (1,),
