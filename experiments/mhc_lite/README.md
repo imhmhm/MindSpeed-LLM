@@ -301,6 +301,74 @@ tilelang 仓自称的 "vs CANN 5.98×" 基线是 eager bmm；**与 aclnn 融合�
 - aclnn 融合算子里 sinkhorn 被摊销（整算子含全部 pre 计算才 0.63ms），
   印证"迭代进 kernel"是正解（vllm-ascend 同路线）。
 
+### 完整 mhc_sinkhorn 端到端对比（`bench_sinkhorn_e2e.py`）
+
+实验对象是**完整语义的 mhc_sinkhorn 模块**（deepseek4/mhc.py：pre 全链
+fp32 RMS→logits GEMM→三头→20 迭代 sinkhorn→y，加 post 全链
+`out = h_post⊗y + h_resᵀ@residual`），fwd 与 fwd+bwd 双口径，S=4096/B=1/
+hc=4/h=1024、bf16 输入 fp32 参数，不含 mhc_lite 维度。
+
+**pre 侧**（fwd / fwd+bwd ms，数值 vs 回退参考）：
+
+| 实现 | fwd | fwd+bwd | y/post/comb maxdiff |
+| --- | --- | --- | --- |
+| aclnn fused（主线 fused 路径，经 wrapper） | **0.638** | **2.145** | 1.6e-02/5.0e-06/4.5e-06 |
+| torch 回退（主线非 fused 分支，eager 循环） | 3.772 | 14.799 | 0 |
+| 回退 + triton sinkhorn 头（自写 fwd/bwd kernel） | 1.262 | 5.151 | 0/0/8.9e-08 |
+
+**post 侧**：
+
+| 实现 | fwd | fwd+bwd | out maxdiff |
+| --- | --- | --- | --- |
+| aclnn fused（主线 wrapper，含输出 clone） | **0.185** | **0.840** | 3.1e-02 |
+| torch broadcast（主线回退形式） | 1.590 | 5.983 | 0 |
+| torch bmm | 0.575 | 1.362 | 3.1e-02 |
+| torchair bmm（整图编译） | 0.570 | 1.363 | 3.1e-02 |
+
+**端到端链**（pre+post，residual = 输入流）：
+
+| 链 | fwd | fwd+bwd | out maxdiff |
+| --- | --- | --- | --- |
+| 主线 fused（aclnn pre + aclnn post） | **0.909** | **2.918** | 3.1e-02 |
+| 主线回退（eager pre + broadcast post） | 4.349 | 15.151 | 0 |
+| triton 头 pre + bmm post（全程不碰 aclnn） | 1.758 | 6.635 | 3.1e-02 |
+| fused pre + bmm post | 1.281 | 3.699 | 3.1e-02 |
+| fused pre + torchair post | 1.287 | 3.707 | 3.1e-02 |
+
+结论：
+
+- **主线 fused 路径在完整 mhc_sinkhorn 维度上没有对手**：端到端 fwd+bwd
+  2.92 ms，第二名（fused pre + torch/bmm post）3.70 ms 还慢 27%——post 侧
+  aclnn 原生反向（0.84 ms 含 wrapper 开销）比最好的 torch 形式（bmm 1.36）
+  快 40%。若要规避 `aclnnMhcPostBackward` 值域缺陷而保留 fused pre，
+  代价是 +0.78 ms/次（×48 ≈ 37 ms/iter，~1%）。
+- **主线回退路径慢 5.2×**（15.15 vs 2.92）：大头是 eager sinkhorn 循环
+  （pre fwd 3.77 ms 里 ~3 ms）与 broadcast post（fwd+bwd 5.98 ms）。
+  非融合场景下至少应把 post 换成 bmm 形式（−4.6 ms）。
+- **自研 triton sinkhorn 头（含反向）是 aclnn 之外唯一带正确反向的融合
+  实现**：把回退 pre fwd+bwd 从 14.80 拉到 5.15 ms（2.9×），梯度与 eager
+  autograd 对齐（dlogits 3.3e-09，d 3.1e-02 的 e2e 差全部来自 post 侧
+  bf16 收缩，与 aclnn 链同量级）。纯 torch+triton 组合 6.64 ms 可作
+  "不依赖缺陷算子"的安全回退，训练仍应走 fused。
+- wrapper 布局适配代价在本形状（B=1）：pre 侧可忽略（fwd 0.638 vs 裸
+  0.633）；post 侧输出 clone +0.07 ms/次（0.185 vs 裸 0.114，×48 ≈
+  3.4 ms/iter），是主线的直接可优化点。
+- torchair 对本节 post 形式（含 `comb.transpose(-1,-2)`）无增益
+  （1.363 vs bmm 1.362）——早前 `bench_compile.py` 里 torchair post
+  −20% 的口径无转置；带转置后 GE 图不再占优。
+
+triton 头反向的实现：前向 kernel 把 40 个归一化阶段的 m 值 checkpoint 到
+GM（[40, bs, 16] fp32，10.5 MB），反向 kernel 用运行时循环按
+`(g − ⟨g, m_out⟩_axis)/(S+eps)` 逐阶段回放（行归一步 dot 按行、列归一步
+按列，softmax 头标准 vjp）。两个 triton-ascend 工程坑记录：
+
+1. **完全展开的大 kernel 会让 ascend backend 编译病态**：40 阶段 × 160
+   条 store 的展开版 ttir 217 KB，backend 编译 >10 min 不出 npubin；同样的
+   循环体改成运行时 `for`（scf.for）后 IR 体量恒定，7 s 编完，数值不变。
+2. **triton 不校验输入连续性**：`mixes[..., 8:].reshape(bs, 16)` 挤掉
+   size-1 维时返回行 stride 24 的视图，kernel 按连续布局静默读错（token 0
+   对、其余全错）；喂 kernel 前必须显式 `.contiguous()`。
+
 ## 复现
 
 ```bash
@@ -321,6 +389,8 @@ PYTHONPATH=<tilelang-ascend clone> LD_LIBRARY_PATH=<conda env>/lib:$LD_LIBRARY_P
 # sinkhorn 各实现对比（tilelang 段同样需要源码构建，缺失时自动跳过）
 PYTHONPATH=<tilelang-ascend clone> LD_LIBRARY_PATH=<conda env>/lib:$LD_LIBRARY_PATH \
   python experiments/mhc_lite/bench_sinkhorn.py
+# 完整 mhc_sinkhorn 端到端对比（pre/post/链路，fwd 与 fwd+bwd）
+python experiments/mhc_lite/bench_sinkhorn_e2e.py
 # mhc_post backward 稳定性矩阵 / 值域复现（会生成 post_backward_case.pt）
 python experiments/mhc_lite/post_backward_shape_matrix.py
 python experiments/mhc_lite/post_backward_repro.py
