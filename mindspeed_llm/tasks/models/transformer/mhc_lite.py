@@ -46,6 +46,10 @@ def _triton_lite_enabled():
     return TRITON_AVAILABLE and os.environ.get('MHC_LITE_TRITON') == '1'
 
 
+def _ascendc_lite_enabled():
+    return TRITON_AVAILABLE and os.environ.get('MHC_LITE_ASCENDC') == '1'
+
+
 def _post_direct_enabled():
     return os.environ.get('MHC_LITE_POST_DIRECT') == '1'
 
@@ -244,6 +248,9 @@ class MHCLite(MegatronModule):
         # which training call order never hits
         self.use_native_post_bwd = os.environ.get('MHC_LITE_NATIVE_POST_BWD') == '1'
         self.use_triton_pre = _triton_lite_enabled()
+        # scheme E: standalone Ascend C LitePreHeads op (bf16 streams only);
+        # its backward is the scheme-B triton kernel set
+        self.use_ascendc_pre = _ascendc_lite_enabled()
 
     def _get_perm_mats(self, device) -> torch.Tensor:
         # class-level cache keeps the fp32 tables out of Float16Module casts
@@ -285,6 +292,13 @@ class MHCLite(MegatronModule):
     def hc_pre(self, x: torch.Tensor, *args, **kwargs):
         # x: [s,b,e,h] -> y: [s,b,h]
         s, b, e, h = x.shape
+        if self.use_ascendc_pre and x.dtype == torch.bfloat16:
+            from mindspeed_llm.ops.ascendc.mhc_lite_ac import lite_pre_ascendc
+            return lite_pre_ascendc(
+                x, self.hc_fn.weight, self.hc_gamma, self.hc_scale, self.hc_base,
+                self._get_perm_mats(x.device), self._get_perm_mats_t(x.device),
+                self.norm_eps,
+            )
         if self.use_triton_pre:
             return _LitePreTritonFn.apply(
                 x, self.hc_fn.weight, self.hc_gamma, self.hc_scale, self.hc_base,

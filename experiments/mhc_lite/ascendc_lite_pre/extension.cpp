@@ -22,8 +22,11 @@ std::vector<at::Tensor> lite_pre_heads(const at::Tensor &x, const at::Tensor &lo
     auto hPre = at::empty({sb, 8}, scale.options());
     auto hPost = at::empty({sb, 8}, scale.options());
     auto coeff = at::empty({sb, 32}, scale.options());
-    ACLNN_CMD(aclnnLitePreHeads, x, logits, scale, base, y, hPre, hPost, coeff);
-    return {y, hPre, hPost, coeff};
+    // the kernel always copies whole 8-token rows, so tail-block lanes past
+    // sb need slack; the returned view hides it
+    auto rstdPad = at::empty({(sb + 7) / 8 * 8}, scale.options());
+    ACLNN_CMD(aclnnLitePreHeads, x, logits, scale, base, y, hPre, hPost, coeff, rstdPad);
+    return {y, hPre, hPost, coeff, rstdPad.narrow(0, 0, sb)};
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)

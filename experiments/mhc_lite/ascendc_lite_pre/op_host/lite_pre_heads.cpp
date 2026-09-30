@@ -18,6 +18,8 @@
  *   h_pre  [sb, 8]       fp32   lanes 0:4 valid
  *   h_post [sb, 8]       fp32   lanes 4:8 valid
  *   coeff  [sb, 32]      fp32   lanes 8:32 valid
+ *   rstd   [sb, 1]       fp32   rsqrt(mean(x^2) + eps), consumed by the
+ *                             backward's chain rule through l = logits*rstd
  * Padded 8/32-wide outputs keep every GM access 32B-aligned; the caller
  * slices the valid lanes.
  */
@@ -69,6 +71,8 @@ static ge::graphStatus InferShape(gert::InferShapeContext* context)
     context->GetOutputShape(2)->SetDim(1, 8);
     *context->GetOutputShape(3) = *xShape;
     context->GetOutputShape(3)->SetDim(1, 32);
+    *context->GetOutputShape(4) = *xShape;
+    context->GetOutputShape(4)->SetDim(1, 1);
     return ge::GRAPH_SUCCESS;
 }
 
@@ -78,6 +82,7 @@ static graphStatus InferDataType(gert::InferDataTypeContext* context)
     context->SetOutputDataType(1, ge::DT_FLOAT);
     context->SetOutputDataType(2, ge::DT_FLOAT);
     context->SetOutputDataType(3, ge::DT_FLOAT);
+    context->SetOutputDataType(4, ge::DT_FLOAT);
     return ge::GRAPH_SUCCESS;
 }
 }
@@ -123,6 +128,11 @@ public:
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
         this->Output("coeff")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Output("rstd")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})

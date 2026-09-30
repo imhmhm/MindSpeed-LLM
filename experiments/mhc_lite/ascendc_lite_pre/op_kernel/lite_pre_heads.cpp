@@ -40,6 +40,13 @@ __aicore__ inline void SyncVS()
     SetFlag<HardEvent::V_S>(id);
     WaitFlag<HardEvent::V_S>(id);
 }
+
+__aicore__ inline void SyncSV()
+{
+    event_t id = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
+    SetFlag<HardEvent::S_V>(id);
+    WaitFlag<HardEvent::S_V>(id);
+}
 }
 
 class KernelLitePreHeads {
@@ -47,7 +54,8 @@ public:
     __aicore__ inline KernelLitePreHeads() {}
 
     __aicore__ inline void Init(GM_ADDR x, GM_ADDR logits, GM_ADDR scale, GM_ADDR base,
-        GM_ADDR y, GM_ADDR hPre, GM_ADDR hPost, GM_ADDR coeff, LitePreHeadsTilingData *tiling)
+        GM_ADDR y, GM_ADDR hPre, GM_ADDR hPost, GM_ADDR coeff, GM_ADDR rstd,
+        LitePreHeadsTilingData *tiling)
     {
         sb_ = tiling->sb;
         h_ = tiling->h;
@@ -60,6 +68,7 @@ public:
         hpGm_.SetGlobalBuffer((__gm__ float *)hPre);
         hoGm_.SetGlobalBuffer((__gm__ float *)hPost);
         coGm_.SetGlobalBuffer((__gm__ float *)coeff);
+        rGm_.SetGlobalBuffer((__gm__ float *)rstd);
 
         const uint32_t xBfBytes = ROWS * eh_ * sizeof(bfloat16_t);
         const uint32_t x32Bytes = ROWS * h_ * sizeof(float);
@@ -81,6 +90,7 @@ public:
         offHpre_ = off;   off += ROWS * 8 * sizeof(float);
         offHpost_ = off;  off += ROWS * 8 * sizeof(float);
         offRsum_ = off;   off += ROWS * 8 * sizeof(float);
+        offRstd_ = off;   off += ROWS * sizeof(float);
         offRtmp_ = off;   off += 512;
         pipe_.InitBuffer(ub_, off);
     }
@@ -125,6 +135,7 @@ private:
         auto hpre8 = ub_.GetWithOffset<float>(ROWS * 8, offHpre_);
         auto hpost8 = ub_.GetWithOffset<float>(ROWS * 8, offHpost_);
         auto rsum = ub_.GetWithOffset<float>(ROWS * 8, offRsum_);
+        auto rstd = ub_.GetWithOffset<float>(ROWS, offRstd_);
         auto rtmp = ub_.GetWithOffset<float>(128, offRtmp_);
 
         DataCopy(xBf, xGm_[r0 * eh_], rows * eh_);
@@ -163,8 +174,9 @@ private:
         // heads: l = logits * rstd
         Cast(l32, lBf, RoundMode::CAST_NONE, ROWS * NL);
         for (int32_t r = 0; r < rows; r++) {
-            const float rstd = 1.0f / sqrt(sumSq[r] / eh_ + EPS);
-            Muls(l32[r * NL], l32[r * NL], rstd, NL);
+            const float rstdV = 1.0f / sqrt(sumSq[r] / eh_ + EPS);
+            rstd.SetValue(r, rstdV);
+            Muls(l32[r * NL], l32[r * NL], rstdV, NL);
         }
 
         Duplicate(one8, 1.0f, ROWS * 8);
@@ -219,12 +231,18 @@ private:
         }
 
         Cast(yBf, y32, RoundMode::CAST_RINT, rows * h_);
+        // route the scalar-written rstd lane through the vector pipe so the
+        // MTE3 copy below is ordered after it; full ROWS width keeps the GM
+        // burst aligned, tail-block rows beyond sb are sliced off by the host
+        SyncSV();
+        Muls(rstd, rstd, 1.0f, ROWS);
         SetFlag<HardEvent::V_MTE3>(0);
         WaitFlag<HardEvent::V_MTE3>(0);
         DataCopy(yGm_[r0 * h_], yBf, rows * h_);
         DataCopy(hpGm_[r0 * 8], hpre8, rows * 8);
         DataCopy(hoGm_[r0 * 8], hpost8, rows * 8);
         DataCopy(coGm_[r0 * NL], c32, rows * NL);
+        DataCopy(rGm_[r0], rstd, ROWS);
         SetFlag<HardEvent::MTE3_MTE2>(0);
         WaitFlag<HardEvent::MTE3_MTE2>(0);
     }
@@ -242,6 +260,7 @@ private:
     GlobalTensor<float> hpGm_;
     GlobalTensor<float> hoGm_;
     GlobalTensor<float> coGm_;
+    GlobalTensor<float> rGm_;
     uint32_t sb_ = 0;
     uint32_t h_ = 0;
     uint32_t eh_ = 0;
@@ -261,25 +280,26 @@ private:
     uint32_t offHpre_ = 0;
     uint32_t offHpost_ = 0;
     uint32_t offRsum_ = 0;
+    uint32_t offRstd_ = 0;
     uint32_t offRtmp_ = 0;
 };
 
 extern "C" __global__ __aicore__ void lite_pre_heads(
     GM_ADDR x, GM_ADDR logits, GM_ADDR scale, GM_ADDR base,
-    GM_ADDR y, GM_ADDR h_pre, GM_ADDR h_post, GM_ADDR coeff,
+    GM_ADDR y, GM_ADDR h_pre, GM_ADDR h_post, GM_ADDR coeff, GM_ADDR rstd,
     GM_ADDR workspace, GM_ADDR tiling)
 {
     GET_TILING_DATA(tilingData, tiling);
     KernelLitePreHeads op;
-    op.Init(x, logits, scale, base, y, h_pre, h_post, coeff, &tilingData);
+    op.Init(x, logits, scale, base, y, h_pre, h_post, coeff, rstd, &tilingData);
     op.Process();
 }
 
 #ifndef __CCE_KT_TEST__
 extern "C" void lite_pre_heads_do(uint32_t blockDim, void *l2ctrl, void *stream, uint8_t *x, uint8_t *logits,
-    uint8_t *scale, uint8_t *base, uint8_t *y, uint8_t *h_pre, uint8_t *h_post, uint8_t *coeff,
+    uint8_t *scale, uint8_t *base, uint8_t *y, uint8_t *h_pre, uint8_t *h_post, uint8_t *coeff, uint8_t *rstd,
     uint8_t *workspace, uint8_t *tiling)
 {
-    lite_pre_heads<<<blockDim, l2ctrl, stream>>>(x, logits, scale, base, y, h_pre, h_post, coeff, workspace, tiling);
+    lite_pre_heads<<<blockDim, l2ctrl, stream>>>(x, logits, scale, base, y, h_pre, h_post, coeff, rstd, workspace, tiling);
 }
 #endif
