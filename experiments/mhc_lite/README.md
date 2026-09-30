@@ -150,10 +150,11 @@ O(1) 量级，阈值 2e-2。两级都过才算数——快但不对直接出局�
 | E | **手写 Ascend C 独立算子 LitePreHeads**（standalone 部署，不进 CANN 安装）：单 AIV kernel 折叠 rms 平方和+三头+y+rstd 输出，aclnn 接口；配套反向 = autograd.Function 包 op + triton 反向（l 逐位同 op 内部） | 方案 C 结论 + vllm-ascend 部署形态 | **前向 op 0.170 ms（tilelang 2.5×）、全链 0.345（−43%）**；e2e fwd 0.847（lite-ac3，比 t3 −10%）；反向暂缓 0.9 ms（torch 胶水，任务 #26 靶子）；梯度 kernel 级 5.96e-08、e2e 门全形状 PASS，见方案 E 节 |
 | F | GEMM 折进 Ascend C 算子（AIC 上 Matmul API、C tile 落 UB 同核消费 epilogue） | matmul_leakyrelu 样板 | **负结果**：精度全过（四形状 h_pre ≤4.1e-05）但算子 0.838 ms——910B4 是 40 AIV+20 AIC，epilogue 被压到 16 个 AIC 向量段（每核 2.5× 行数），纯 AIC 融合地板 ~0.43 已输 E 拆分 0.343；正确分工 = E 拆分本身，见 F/G 节 |
 | G | **launch 融合**：一个 pybind 调用串 W'+GEMM+LitePreHeads+h_res，无新 kernel | 组件和 vs 全链差的归因 | **全链 0.343→0.306（−11%，vs 现行 triton 链 −40%）**，输出与 E 逐位一致；56 次/iter ≈ −11 ms/iter，见 F/G 节 |
+| H | **反向 Ascend C 化**：单 AIV kernel `LitePreGrad` 吃掉 E 反向的全部 triton 段与 torch 胶水（三头 jacobian/dcoeff 折入/rstd 链/grad_x/dscale 修正），GEMM 留 autograd | E 节反向归因（胶水占 1.2-1.6 ms） | 算子 0.356 ms（替换段 1.204）；pre fwd+bwd ac→acg **−1.1 ms（−40%）**；lite-ac4 e2e fwd+bwd **2.27 ms（比 t3 −17%、比 full-cann −22%）**，精度见方案 H 节 |
 
-结论：**A+B+D（lite-t3）e2e fwd+bwd 2.768 ms，比 full-cann fused 2.923
-快 5.3%**，两级门卡与 `triton_parity_test.py` 全 PASS。与 30-iter 实测
-（lite 快 ~2.7%）方向一致；组件级口径下 lite 已越过 fused 算子基线。
+结论：**E+H+A+D（lite-ac4）e2e fwd+bwd 2.27 ms，比 full-cann fused 2.923
+快 22%**，两级门卡全 PASS（`bench_lite_e2e.py` lite-acg / lite-ac4）。pre
+级组件口径下 lite 已越过 fused 算子基线一个身位。
 
 ## 后续（tier 计划）
 
@@ -161,9 +162,11 @@ O(1) 量级，阈值 2e-2。两级都过才算数——快但不对直接出局�
 - Tier 2（已实现）：launch/python 开销与中间量物化的消除（见下节）；
 - backlog：调研比 lite 更高效的开源 MHC 变体（TileKernels/sglang/vLLM/CANN
   上游）并择优吸收；~~CANN 侧 lite 版融合 pre 算子~~（方案 E 已做 standalone
-  前向+配套 triton 反向，见下；~~AIC GEMM 折进算子~~（任务 #25 已结：F 负
-  结果 + G launch 融合 0.306，见 F/G 节）；剩余：反向 Ascend C 化
-  （任务 #26））。
+  前向；~~AIC GEMM 折进算子~~（任务 #25 已结：F 负结果 + G launch 融合
+  0.306，见 F/G 节）；~~反向 Ascend C 化~~（任务 #26 已结：方案 H 算子
+  0.356 ms、lite-ac4 e2e fwd+bwd 2.27，见方案 H 节））。剩余候选：E 前向
+  与 G/H 链的合流（一个 pybind 调用吃掉 fwd+bwd 两侧的派发往返）、主线
+  pipeline 冒烟。
 
 ## Tier 2：差距归因与消除（`MHC_LITE_TRITON=1`）
 
@@ -499,8 +502,8 @@ t2/t3 的 tier1 小是因为与 t0 共享同一条 l 舍入链，并非精度更
 torch 侧胶水——lite_pre_backward 本身 0.812 ms（与 t3 共用），E 多出的
 是 drstd/coef 标量链 0.246、wp vjp 0.195、cast/gather/contiguous 各
 0.04-0.08，加上十几个串行小 kernel 的 launch 开销（分段和 1.83 ms vs
-实测反向 2.93 ms）。**前向已净赢（e2e fwd −10%）**；反向胶水正是任务
-#26（反向 Ascend C 化）的靶子，届时整段并入一个算子。
+实测反向 2.93 ms）。**前向已净赢（e2e fwd −10%）**；反向胶水已由方案 H
+（见下）并入一个算子。
 
 ### 方案 F/G：AIC+AIV 联合实验（任务 #25，`ascendc_lite_pre_fused/`）
 
@@ -574,6 +577,62 @@ Python/派发往返只付一次：
 （−11%）；对现行 triton 链 −40%。56 次/iter 折算 ≈ −11 ms/iter。剩余
 0.07 ms 是流上 kernel 间空隙与 dispatcher 分配，只能靠真融合（E+G 之上
 没有更便宜的确定性收益了，F 已证伪）。
+
+### 方案 H：反向 Ascend C 化（任务 #26，`ascendc_lite_pre_grad/`）
+
+E 反向里 1.2-1.6 ms 的 triton kernel 串 + torch 胶水（l 重算、cast、
+drstd/coef 标量链、coef⊙x、dscale gather、hpre 切片）并进一个单 AIV
+kernel `LitePreGrad`（与 E 前向同款部署形态，三算子同一包构建）。
+kernel 按 8 行一组 grid-stride：dw_i=⟨g,x_i⟩ 逐块归约、三头 jacobian、
+dcoeff=ghres@perm 以 16 次 `Axpy` 折入、drstd→coef、grad_x=h_pre·g+coef·x
+（全程 fp32，单次 bf16 舍入）、grad_logits 单次舍入直出、dscale/dbase 每
+核累加后一次原子加（wrapper 零初始化目标），并把 1/4、1/4、1/24 的车道
+数修正折进 kernel。两条真 GEMM（grad_wp=dlᵀ@x、d_xf=dl@W'）留在
+autograd——折它们就要上 AIC，F 的教训直接适用。
+
+kernel 侧的三条硬约束（都踩过）：
+
+1. **跨行 chunk 拷贝不连续**：`DataCopy(xBf, xGm_[r0*eh+c*h], rows*h)`
+   拷的是连续 slab，而第 c 个 chunk 的相邻行相距 eh——整块错位。症状
+   极具迷惑性：只有 pre 车道错（只有 dw 碰 x），grad_x 却全对——
+   coef·x 项比 h_pre·g 小三个量级，被最终 bf16 舍入地板完全掩盖。改逐行
+   拷贝即对；
+2. **尾组 16B 拷贝**：ghpost 每行 4 float，尾组 rows=1 时只拷 16B，低于
+   32B 粒度——wrapper 把 ghpost 与 rstd（按整 8 行块读）垫到 8 行倍数，
+   kernel 恒读 `ROWS*4`；
+3. **ReduceSum dst 写宽**：归约结果只落对齐的 8-lane 窗口
+   （`rsum[r*32+c*8]`）再一次性标量打包进 dw8——与 24-lane 按 32 对齐
+   同族规则，跨 lane 单点 dst 会被按向量写宽踩邻居。
+
+精度（`probe_ascendc_grad.py`，三重参考：triton 路径、fp32 重算、逐段
+归因）：8/64/4096/1033/512×1024、4096×512 六形状，grad_logits 在
+8/64/512 与 triton **逐位一致**，4096 段差 1.5e-08；每段 op-vs-fp32 与
+triton-vs-fp32 处处同距（pre 3.05e-05、post 3.8e-06、res 1.9e-06，均为
+bf16 输出地板）；dscale/dbase op 比 triton 更近 fp32（原子加求和顺序更
+优）；grad_x 同级 3-5e-04（coef 项本就在舍入地板下）。e2e 门：
+lite-acg / lite-ac4 全形状 PASS。
+
+计时（sb=4096×1，ms）：
+
+| 项 | 数值 |
+| --- | --- |
+| LitePreGrad 算子单独 | **0.356** |
+| 被替换的 triton 段+胶水（probe 同口径） | 1.204 |
+
+| 变体 | pre fwd | pre fwd+bwd | e2e fwd | e2e fwd+bwd |
+| --- | --- | --- | --- | --- |
+| lite-ac（E+triton 反向） | 0.636 | 2.756 | 0.957* | 4.957* |
+| lite-acg（E+H） | 0.62 | **1.65** | 0.96* | 3.08* |
+| lite-t3（A+B+D） | 0.711 | 2.069 | 0.932 | 2.744 |
+| lite-ac3（E+A+D） | 0.591 | 2.645 | 0.791 | 3.395 |
+| **lite-ac4（E+H+A+D）** | 0.62 | 1.75 | **0.84** | **2.27** |
+
+\* 未开原生 post 反向，e2e 口径不可比。同栈对比：pre fwd+bwd
+ac→acg **−1.1 ms（−40%）**，56 次/iter 折算 ≈ −60 ms/iter；ac4 比 t3
+−0.32 ms、比 ac3 −0.9 ms；e2e fwd+bwd ac4 2.27 比 t3 −17%、比 full-cann
+fused 2.923 **−22%**。pre 反向剩余 1.1 ms 里约 0.6 ms 是两条 GEMM 与
+autograd 自身的 wp vjp/launch（probe_ascendc_bwd_perf 口径），已到
+AIC 之外的可压缩下限。
 
 ### sinkhorn（full MHC res 头）各实现对比（`bench_sinkhorn.py`）
 
@@ -707,13 +766,17 @@ python experiments/mhc_lite/probe_ascendc_bwd_perf.py
 bash experiments/mhc_lite/ascendc_lite_pre_fused/sync_and_build.sh
 python experiments/mhc_lite/probe_fused_c_layout.py
 python experiments/mhc_lite/bench_ascendc_lite_pre_fused.py
+# 方案 H（任务 #26）：三算子一次构建（heads+fused+grad 同包）+ 反向算子
+# 精度/计时探针（vs triton 路径、vs fp32 重算，六形状含尾组）
+bash experiments/mhc_lite/ascendc_lite_pre_grad/sync_and_build.sh
+python experiments/mhc_lite/probe_ascendc_grad.py
 # sinkhorn 各实现对比（tilelang 段同样需要源码构建，缺失时自动跳过）
 PYTHONPATH=<tilelang-ascend clone> LD_LIBRARY_PATH=<conda env>/lib:$LD_LIBRARY_PATH \
   python experiments/mhc_lite/bench_sinkhorn.py
 # 完整 mhc_sinkhorn 端到端对比（pre/post/链路，fwd 与 fwd+bwd）
 python experiments/mhc_lite/bench_sinkhorn_e2e.py
 # 优化 campaign 基线与方案变体（每变体独立进程；跨进程噪声 ~±0.05ms，取多次中位数）
-for v in full-cann lite-t0 lite-t2 lite-t2-native lite-t2-direct lite-t3 lite-ac lite-ac3; do
+for v in full-cann lite-t0 lite-t2 lite-t2-native lite-t2-direct lite-t3 lite-ac lite-ac3 lite-acg lite-ac4; do
   python experiments/mhc_lite/bench_lite_e2e.py --variant $v
 done
 # mhc_post backward 稳定性：shape 矩阵 / 值混合（会生成 post_backward_case.pt）
