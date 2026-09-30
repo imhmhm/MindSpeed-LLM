@@ -118,7 +118,7 @@ def main():
 
     def chain_ac():
         logits_raw = torch.matmul(xf, wprime().t())
-        y, hpre8, hpost8, coeff = ext.lite_pre_heads(xf, logits_raw, scale32, base.view(N32))
+        y, hpre8, hpost8, coeff, rstd = ext.lite_pre_heads(xf, logits_raw, scale32, base.view(N32))
         h_res = torch.matmul(coeff[:, 2 * E:N32], perm_flat)
         return y, hpre8[:, 0:4], hpost8[:, E:8], h_res
 

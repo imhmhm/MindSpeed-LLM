@@ -147,7 +147,7 @@ O(1) 量级，阈值 2e-2。两级都过才算数——快但不对直接出局�
 | A | post 全原生 aclnn fwd+bwd | 主线 fused 路径 | e2e fwd+bwd −0.16（2.94→2.78 vs lite-t2） |
 | D | post 直连算子 + 输出视图（免 wrapper 的输出 clone；B=1 时输入 permute 本就是零成本视图） | A5 实测 | e2e fwd −0.055（≈clone 成本）；反向无收益——clone 的 vjp 是恒等映射（不发生梯度拷贝），实测 fwd+bwd 持平。B>1 时输出是非连续视图，主线采用前需过 pipeline 冒烟 |
 | C | Ascend C 自定义 lite_pre 融合算子（无 sinkhorn 版 hc_pre：AIV cast→AIC GEMM→vector 三头+y） | vllm-ascend hc_pre 模板；tilelang-ascend 原型 | tilelang 原型已做（见下节）：单 kernel 0.424 ms、精度全部低于现行链噪声底，但 e2e 0.648 vs 现行链 0.574——W' 重建 + launch 间隙吃掉 kernel 收益；进 0.4 ms 须手写 Ascend C |
-| E | **手写 Ascend C 独立算子 LitePreHeads**（standalone 部署，不进 CANN 安装）：单 AIV kernel 折叠 rms 平方和+三头+y，aclnn 接口 | 方案 C 结论 + vllm-ascend 部署形态 | **op 0.170 ms（tilelang 2.5×），全链 0.345 vs 现行 0.606（−43%）、aclnn 参照 0.639（−46%）**；精度全部 ≤ 现行链噪声底（h_pre 好 36×），见方案 E 节 |
+| E | **手写 Ascend C 独立算子 LitePreHeads**（standalone 部署，不进 CANN 安装）：单 AIV kernel 折叠 rms 平方和+三头+y+rstd 输出，aclnn 接口；配套反向 = autograd.Function 包 op + triton 反向（l 逐位同 op 内部） | 方案 C 结论 + vllm-ascend 部署形态 | **前向 op 0.170 ms（tilelang 2.5×）、全链 0.345（−43%）**；e2e fwd 0.847（lite-ac3，比 t3 −10%）；反向暂缓 0.9 ms（torch 胶水，任务 #26 靶子）；梯度 kernel 级 5.96e-08、e2e 门全形状 PASS，见方案 E 节 |
 
 结论：**A+B+D（lite-t3）e2e fwd+bwd 2.768 ms，比 full-cann fused 2.923
 快 5.3%**，两级门卡与 `triton_parity_test.py` 全 PASS。与 30-iter 实测
@@ -159,7 +159,8 @@ O(1) 量级，阈值 2e-2。两级都过才算数——快但不对直接出局�
 - Tier 2（已实现）：launch/python 开销与中间量物化的消除（见下节）；
 - backlog：调研比 lite 更高效的开源 MHC 变体（TileKernels/sglang/vLLM/CANN
   上游）并择优吸收；~~CANN 侧 lite 版融合 pre 算子~~（方案 E 已做 standalone
-  前向，见下；剩余：AIC GEMM 折进算子、配套反向）。
+  前向+配套 triton 反向，见下；剩余：AIC GEMM 折进算子（任务 #25）、反向
+  Ascend C 化（任务 #26））。
 
 ## Tier 2：差距归因与消除（`MHC_LITE_TRITON=1`）
 
@@ -399,8 +400,8 @@ clone 里借其构建系统出 `.run` 包，解出的 vendor 树放在
 生效：`GetCustOpApiHandlers` 会先于 libopapi.so 在该路径 dlopen
 `libcust_opapi.so`，aclnn 符号即被接住。全程无需 root、不碰任何 CANN 文件。
 
-算子形态（`LitePreHeads`，4 输入 4 输出，bf16 x/logits + fp32
-scale[32]/base[32]）：
+算子形态（`LitePreHeads`，4 输入 5 输出，bf16 x/logits + fp32
+scale[32]/base[32]，第 5 路输出为 fp32 rstd[sb] 供反向免重算）：
 
 - 单 AIV kernel，每向量核一次吃 8 个 token 走完全程：pass1 RMS 平方和
   （chunk 循环 + 标量寄存器累加）→ 三头（sigmoid / 2·sigmoid / softmax，
@@ -451,6 +452,52 @@ scale[32]/base[32]）：
 现行链快 43%、比 aclnn 融合参照（full 语义口径）快 46%，且精度全面不差
 于现行链。剩余空间：GEMM 折进算子（AIC 段）与配套反向（独立 op 或
 autograd.Function 包 triton 反向）。
+
+### 方案 E 配套反向（autograd.Function 包 op 前向 + triton 反向）
+
+`mindspeed_llm/ops/ascendc/mhc_lite_ac.py`（`MHC_LITE_ASCENDC=1`，
+module 挂接点在 `MHCLite.hc_pre`）。Function 只包算子本身：W'=W⊙γ、
+logits GEMM、h_res 混合留在 Function 外走原生 autograd，于是 h_pre 不出
+算子、kernel 假设 dh_pre=⟨dy,x⟩ 完整成立。反向路径：
+
+- `l = logits.float() * rstd`：与算子内部逐位相同（bf16→fp32 cast 与
+  fp32 乘均精确），triton 反向不重算任何前向中间量——σ'=h(1-h)、softmax
+  jacobian 全部经前向**输出**表达，正反向实现差异不引入额外精度差；
+- dscale 修正：kernel 的 ds3 是每组总量，按车道宽度除回（1/4、1/4、1/24），
+  否则 gather 反向把 [32] 车道再求和一遍（实测恰 4×/4×/24× 错）。
+
+精度（`probe_ascendc_bwd_stages.py`，sb=1024）：
+
+| 层级 | 结果 |
+| --- | --- |
+| kernel 级（喂 op 同款 l） | dlogits md 5.96e-08、dscale 3.8e-06、dbase 2.3e-05 |
+| wrapper 叶子梯度 vs fp32 autograd（饱和 base） | dx 3.2e-4、dW 5.8e-3、dgamma 4.2e-3、dscale 4.5e-4、dbase 4.2e-6（rel） |
+| 值域压测 | 近零 x（rstd≈1/√eps）全 ≤5.4e-3；饱和 scale 全 ≤7.6e-3 |
+| e2e 门（`bench_lite_e2e.py` lite-ac/lite-ac3） | 4096×1、512×2、1033×1（尾块）全 PASS |
+
+dscale 噪声地板与门的重设计：e2e 里 dscale 是双重 token 求和标量，bf16
+前向舍入的互差随 sb 放大——**t0 自身**在 512×2 达 5.0e-2、1033×1 达
+6.5e-2（即 5e-2 绝对门在 sb≥1033 时任何 bf16 链都过不了，t0 也 FAIL）。
+两级门各加一条实测地板豁免：某张量上变体 vs fp32 不劣于 t0 自身时，该
+张量的互差不构成结构性错误证据（lite-ac 的 dscale 全部更接近 fp32）。
+t2/t3 的 tier1 小是因为与 t0 共享同一条 l 舍入链，并非精度更高。
+
+计时（`bench_lite_e2e.py` 4096×1，ms）：
+
+| 变体 | pre fwd | pre fwd+bwd | e2e fwd | e2e fwd+bwd |
+| --- | --- | --- | --- | --- |
+| lite-t3（A+D，现行最优） | 0.722 | **1.973** | 0.942 | **2.634** |
+| lite-ac（E，未叠加） | 0.610 | 2.866 | 1.056* | 5.024* |
+| lite-ac3（E+A+D） | **0.623** | 2.915 | **0.847** | 3.714 |
+
+\* lite-ac 未开原生 post 反向（torch fp32 einsum），e2e 口径不可比。
+
+归因（`probe_ascendc_bwd_perf.py`，sb=4096）：反向慢的 0.9 ms 全在
+torch 侧胶水——lite_pre_backward 本身 0.812 ms（与 t3 共用），E 多出的
+是 drstd/coef 标量链 0.246、wp vjp 0.195、cast/gather/contiguous 各
+0.04-0.08，加上十几个串行小 kernel 的 launch 开销（分段和 1.83 ms vs
+实测反向 2.93 ms）。**前向已净赢（e2e fwd −10%）**；反向胶水正是任务
+#26（反向 Ascend C 化）的靶子，届时整段并入一个算子。
 
 ### sinkhorn（full MHC res 头）各实现对比（`bench_sinkhorn.py`）
 
@@ -575,13 +622,17 @@ PYTHONPATH=<tilelang-ascend clone> LD_LIBRARY_PATH=<conda env>/lib:$LD_LIBRARY_P
 bash experiments/mhc_lite/ascendc_lite_pre/sync_and_build.sh
 python experiments/mhc_lite/probe_ascendc_stages.py
 python experiments/mhc_lite/bench_ascendc_lite_pre.py
+# 方案 E 配套反向：kernel 级精确性 / 叶子梯度 / dscale 噪声机制 / 值域压测
+python experiments/mhc_lite/probe_ascendc_bwd_stages.py
+# 方案 E 反向分段计时（torch 胶水归因，任务 #26 依据）
+python experiments/mhc_lite/probe_ascendc_bwd_perf.py
 # sinkhorn 各实现对比（tilelang 段同样需要源码构建，缺失时自动跳过）
 PYTHONPATH=<tilelang-ascend clone> LD_LIBRARY_PATH=<conda env>/lib:$LD_LIBRARY_PATH \
   python experiments/mhc_lite/bench_sinkhorn.py
 # 完整 mhc_sinkhorn 端到端对比（pre/post/链路，fwd 与 fwd+bwd）
 python experiments/mhc_lite/bench_sinkhorn_e2e.py
 # 优化 campaign 基线与方案变体（每变体独立进程；跨进程噪声 ~±0.05ms，取多次中位数）
-for v in full-cann lite-t0 lite-t2 lite-t2-native lite-t2-direct lite-t3; do
+for v in full-cann lite-t0 lite-t2 lite-t2-native lite-t2-direct lite-t3 lite-ac lite-ac3; do
   python experiments/mhc_lite/bench_lite_e2e.py --variant $v
 done
 # mhc_post backward 稳定性：shape 矩阵 / 值混合（会生成 post_backward_case.pt）

@@ -25,6 +25,11 @@ Variants:
   lite-t2-direct  + MHC_LITE_POST_DIRECT=1 (scheme D: aclnn post called on
                   native layouts, output returned as a view, no wrapper clone)
   lite-t3         TRITON + NATIVE_POST_BWD + POST_DIRECT (A+D stacked)
+  lite-ac         MHC_LITE_ASCENDC=1 (scheme E: standalone Ascend C
+                  LitePreHeads pre op, scheme-B triton backward; needs the
+                  op built via sync_and_build.sh and ASCEND_CUSTOM_OPP_PATH)
+  lite-ac3        scheme E stacked with A+D (native aclnn post backward +
+                  direct post call) -- the fair e2e comparison against lite-t3
 """
 
 import argparse
@@ -35,6 +40,10 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
+
+os.environ.setdefault(
+    'ASCEND_CUSTOM_OPP_PATH',
+    str(Path.home() / 'work/dataset/huashan_zhh_guiyang_turbo/github/cann-ops/build_out'))
 
 import torch  # noqa: E402
 import torch_npu  # noqa: E402
@@ -181,7 +190,7 @@ class _EnvCleared:
     them), so a Tier-0 torch reference module can coexist with a variant."""
 
     KEYS = ('MHC_LITE_TRITON', 'MHC_LITE_NATIVE_POST_BWD', 'MHC_LITE_POST_DIRECT',
-            'MHC_LITE_TORCH_POST')
+            'MHC_LITE_TORCH_POST', 'MHC_LITE_ASCENDC')
 
     def __enter__(self):
         self.saved = {k: os.environ.pop(k, None) for k in self.KEYS}
@@ -223,9 +232,17 @@ def check(module, refmod, s, b, tag, gates):
     tier1: variant vs the Tier-0 torch module on the same bf16 inputs -- both
            share the forward graph, so structural scheme errors (wrong axis,
            layout, missing term) show up at O(1) relative, far above the
-           last-bit rounding floor.
+           last-bit rounding floor.  A tensor is exempt from the tier-1 gate
+           when the variant is at least as close to the fp32 reference as
+           tier-0 itself: independently-rounded bf16 chains (e.g. scheme E's
+           GEMM-then-rstd vs tier-0's rstd-then-GEMM) legitimately pair at
+           the shared bf16 noise level, and that level is measured, not
+           assumed -- tier-0's own dscale-vs-fp32 reaches 5e-2 at sb=1024,
+           twice a typical variant's.
     tier2: variant vs an fp32 torch reference -- bf16 forward noise level;
-           scalar grads sum over all tokens, hence relative comparison.
+           scalar grads sum over all tokens, hence relative comparison.  A
+           grad above the 5e-2 cap is exempt when it is still within tier-0's
+           own measured fp32 distance on the same inputs.
     """
     x, gy, gpost, gres, gout = make_inputs(s, b, torch.bfloat16)
     perm_flat = perm_mats_flat(E)
@@ -258,20 +275,49 @@ def check(module, refmod, s, b, tag, gates):
                 for m, r in zip(outs, ref_outs))
 
     tier1 = 0.0
+    tier1_each = None
+    rel0 = {}
+    ctx_exempt = set()
     if refmod is not None and refmod is not module:
         with _EnvCleared():
             outs0, mods0 = _module_grads(refmod, x, gy, gpost, gres, gout)
-        tier1 = max([((m.float() - m0.float()).abs().max().item()
-                      / max(m0.float().abs().max().item(), 1e-6))
-                     for m, m0 in zip(list(mods) + list(outs), list(mods0) + list(outs0))])
+        pair = list(zip(mods, mods0)) + list(zip(outs, outs0))
+        tier1_each = {n: (m.float() - m0.float()).abs().max().item()
+                      / max(m0.float().abs().max().item(), 1e-6)
+                      for n, (m, m0) in zip(gnames + names, pair)}
+        rel_all = dict(zip(gnames, rel))
+        rel_all.update({n: (m.float() - r.detach()).abs().max().item()
+                        / max(r.detach().abs().max().item(), 1e-6)
+                        for n, m, r in zip(names, outs, ref_outs)})
+        rel0 = {n: (m0.float() - r).abs().max().item() / max(r.abs().max().item(), 1e-6)
+                for n, m0, r in zip(gnames + names, list(mods0) + list(outs0),
+                                    list(refs) + [ro.detach() for ro in ref_outs])}
+        charged = {n: v for n, v in tier1_each.items() if rel_all[n] > rel0[n]}
+        tier1 = max(charged.values(), default=0.0)
+        ctx_exempt = {n for n in tier1_each if n not in charged}
+        # tier2 gets the same measured-floor treatment: a grad within tier-0's
+        # own fp32 distance is not variant precision loss (dscale's bf16 floor
+        # at sb>=1033 exceeds 5e-2 for tier-0 itself: 6.5e-2 at 1033x1)
+        ctx_exempt |= {n for n, v in zip(gnames, rel) if v > 5e-2 and v <= rel0[n]}
 
-    ok = rel_f <= 2e-2 and max(rel) <= 5e-2 and tier1 <= 2e-2
+    rel_ok = [v <= 5e-2 or n in ctx_exempt for n, v in zip(gnames, rel)]
+    ok = rel_f <= 2e-2 and all(rel_ok) and tier1 <= 2e-2
     gates.append(ok)
     print(f'  [{tag} s={s} b={b}] fwd {" ".join(fwd)}')
     print(f'  [{" " * len(tag)} s={s} b={b}] bwd(abs|ref|) {" ".join(bwd)}')
     t1s = 'n/a' if refmod is None else f'{tier1:.1e}'
     print(f'  [{" " * len(tag)} s={s} b={b}] tier2 relw {max(rel):.1e} relf {rel_f:.1e} '
-          f'tier1-vs-t0 {t1s} -> {"PASS" if ok else "FAIL"}', flush=True)
+          f'tier1-vs-t0 {t1s} -> {"PASS" if ok else "FAIL"}')
+    if tier1_each is not None and max(tier1_each.values()) > 1e-2:
+        parts = [f'{n}{"*" if n in ctx_exempt else ""}:{v:.1e}'
+                 for n, v in tier1_each.items() if v > 1e-3]
+        print(f'  [{" " * len(tag)} s={s} b={b}] tier1 per-tensor (* exempt, within '
+              f'tier-0 own fp32 distance): {" ".join(parts)}')
+    if max(rel) > 1e-2:
+        parts = [f'{n}{"*" if n in ctx_exempt else ""}:{v:.1e}'
+                 for n, v in zip(gnames, rel) if v > 1e-3]
+        print(f'  [{" " * len(tag)} s={s} b={b}] tier2 rel per-grad (* exempt): '
+              f'{" ".join(parts)}', flush=True)
 
 
 def run_lite(variant, s, b):
@@ -384,7 +430,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--variant', required=True,
                         choices=['full-cann', 'lite-t0', 'lite-t2', 'lite-t2-native',
-                                 'lite-t2-direct', 'lite-t3'])
+                                 'lite-t2-direct', 'lite-t3', 'lite-ac', 'lite-ac3'])
     parser.add_argument('--shape', default=f'{S}x{B}', help='sxb')
     args = parser.parse_args()
 
@@ -392,13 +438,15 @@ def main():
     if args.variant == 'full-cann':
         run_full(s, b)
         return
+    if args.variant in ('lite-ac', 'lite-ac3'):
+        os.environ['MHC_LITE_ASCENDC'] = '1'
     if args.variant.startswith('lite-t2') or args.variant == 'lite-t3':
         os.environ['MHC_LITE_TRITON'] = '1'
-    if args.variant in ('lite-t2-native', 'lite-t3'):
+    if args.variant in ('lite-t2-native', 'lite-t3', 'lite-ac3'):
         os.environ['MHC_LITE_NATIVE_POST_BWD'] = '1'
-    if args.variant in ('lite-t2-direct', 'lite-t3'):
+    if args.variant in ('lite-t2-direct', 'lite-t3', 'lite-ac3'):
         os.environ['MHC_LITE_POST_DIRECT'] = '1'
-    if args.variant in ('lite-t2-native', 'lite-t3'):
+    if args.variant in ('lite-t2-native', 'lite-t3', 'lite-ac3'):
         warm_native_post(torch.bfloat16)
     run_lite(args.variant, s, b)
 

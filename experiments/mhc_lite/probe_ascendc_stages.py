@@ -63,23 +63,25 @@ def scale_vec(s0, s1, s2):
 
 def run(sv, bv, tag):
     logits = torch.matmul(xf, wp.t())
-    y, hpre, hpost, coeff = ext.lite_pre_heads(xf, logits, sv, bv)
+    y, hpre, hpost, coeff, rstd = ext.lite_pre_heads(xf, logits, sv, bv)
     torch.npu.synchronize()
     print(f'--- {tag}')
     print('h_pre [0,:8] :', [f'{v:+.4f}' for v in hpre[0].tolist()])
     print('h_post[0,:8] :', [f'{v:+.4f}' for v in hpost[0].tolist()])
     print('coeff [0]    :', [f'{v:+.4f}' for v in coeff[0].tolist()])
     print('y[0,:4]      :', [f'{v:+.4f}' for v in y[0, :4].tolist()])
-    return y, hpre, hpost, coeff
+    return y, hpre, hpost, coeff, rstd
 
 
 # P1: zero scale and base -> pure sigmoid(0)/softmax(0) constants
-y1, hp1, ho1, c1 = run(scale_vec(0, 0, 0), torch.zeros(N32, device=DEV), 'P1 scale=0 base=0')
+y1, hp1, ho1, c1, rstd1 = run(scale_vec(0, 0, 0), torch.zeros(N32, device=DEV), 'P1 scale=0 base=0')
 print('expect h_pre=0.5 h_post=1.0 coeff=1/24=%.4f y=0.5*sum(x)' % (1 / 24))
 print('y err vs 0.5*sum(x):', (y1.float() - 0.5 * x.float().sum(1)).abs().max().item())
 
 # P2: unit scale, zero base -> sigmoid(l * rstd)
-y2, hp2, ho2, c2 = run(scale_vec(1, 1, 1), torch.zeros(N32, device=DEV), 'P2 scale=1 base=0')
+y2, hp2, ho2, c2, rstd2 = run(scale_vec(1, 1, 1), torch.zeros(N32, device=DEV), 'P2 scale=1 base=0')
+rstd_ref = torch.rsqrt(xf.float().pow(2).mean(-1) + EPS)
+print('rstd md (P2, all rows)     :', (rstd2 - rstd_ref).abs().max().item())
 xf32 = xf.float()
 rstd = torch.rsqrt(xf32.pow(2).mean(-1, keepdim=True) + EPS)
 logits_r = (xf32 * rstd) @ (wp.float()).t()
@@ -93,7 +95,7 @@ print('expect coeff=softmax(l)  md:',
 print('l[0,:8]:', [f'{v:+.4f}' for v in logits_r[0, :8].tolist()])
 
 # P3: real scalars
-y3, hp3, ho3, c3 = run(scale_vec(scale[0], scale[1], scale[2]), base, 'P3 real')
+y3, hp3, ho3, c3, rstd3 = run(scale_vec(scale[0], scale[1], scale[2]), base, 'P3 real')
 perm_flat = torch.eye(E)[torch.tensor(
     list(__import__('itertools').permutations(range(E))))].flatten(1).to(DEV)
 print('h_pre md :', (hp3[:, 0:4].float() - torch.sigmoid(pre_l * scale[0] + base[0:4])).abs().max().item())
