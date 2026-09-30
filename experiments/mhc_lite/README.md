@@ -146,7 +146,8 @@ O(1) 量级，阈值 2e-2。两级都过才算数——快但不对直接出局�
 | B | pre 反向减负：dcoeff 小 GEMM（[bs,16]@[16,24]）折进 megaK kernel（寄存器 [2,16,24] 乘加）+ dlogits 单次 cast 复用 | Tier-2 手段延伸 | pre fwd+bwd 2.14→2.04 ms（−0.10）；kernel 级归因：独立 matmul 0.023 ms，折入仅 +0.006 ms，其余为派发/分配开销 |
 | A | post 全原生 aclnn fwd+bwd | 主线 fused 路径 | e2e fwd+bwd −0.16（2.94→2.78 vs lite-t2） |
 | D | post 直连算子 + 输出视图（免 wrapper 的输出 clone；B=1 时输入 permute 本就是零成本视图） | A5 实测 | e2e fwd −0.055（≈clone 成本）；反向无收益——clone 的 vjp 是恒等映射（不发生梯度拷贝），实测 fwd+bwd 持平。B>1 时输出是非连续视图，主线采用前需过 pipeline 冒烟 |
-| C | Ascend C 自定义 lite_pre 融合算子（无 sinkhorn 版 hc_pre：AIV cast→AIC GEMM→vector 三头+y） | vllm-ascend hc_pre 模板；tilelang-ascend 原型 | tilelang 原型已做（见下节）：单 kernel 0.424 ms、精度全部低于现行链噪声底，但 e2e 0.648 vs 现行链 0.574——W' 重建 + launch 间隙吃掉 kernel 收益；进 0.4 ms 须手写 Ascend C 进 CANN ops |
+| C | Ascend C 自定义 lite_pre 融合算子（无 sinkhorn 版 hc_pre：AIV cast→AIC GEMM→vector 三头+y） | vllm-ascend hc_pre 模板；tilelang-ascend 原型 | tilelang 原型已做（见下节）：单 kernel 0.424 ms、精度全部低于现行链噪声底，但 e2e 0.648 vs 现行链 0.574——W' 重建 + launch 间隙吃掉 kernel 收益；进 0.4 ms 须手写 Ascend C |
+| E | **手写 Ascend C 独立算子 LitePreHeads**（standalone 部署，不进 CANN 安装）：单 AIV kernel 折叠 rms 平方和+三头+y，aclnn 接口 | 方案 C 结论 + vllm-ascend 部署形态 | **op 0.170 ms（tilelang 2.5×），全链 0.345 vs 现行 0.606（−43%）、aclnn 参照 0.639（−46%）**；精度全部 ≤ 现行链噪声底（h_pre 好 36×），见方案 E 节 |
 
 结论：**A+B+D（lite-t3）e2e fwd+bwd 2.768 ms，比 full-cann fused 2.923
 快 5.3%**，两级门卡与 `triton_parity_test.py` 全 PASS。与 30-iter 实测
@@ -157,8 +158,8 @@ O(1) 量级，阈值 2e-2。两级都过才算数——快但不对直接出局�
 - Tier 1（已实现）：triton 融合 pre/post 侧 kernel，消除多 kernel 开销；
 - Tier 2（已实现）：launch/python 开销与中间量物化的消除（见下节）；
 - backlog：调研比 lite 更高效的开源 MHC 变体（TileKernels/sglang/vLLM/CANN
-  上游）并择优吸收；CANN 侧 lite 版融合 pre 算子（无 sinkhorn，理论快于
-  full 的 mhc_pre_sinkhorn）。
+  上游）并择优吸收；~~CANN 侧 lite 版融合 pre 算子~~（方案 E 已做 standalone
+  前向，见下；剩余：AIC GEMM 折进算子、配套反向）。
 
 ## Tier 2：差距归因与消除（`MHC_LITE_TRITON=1`）
 
@@ -389,6 +390,68 @@ CANN ops（AIV cast→AIC GEMM→vector 三段流水），tilelang 层无法达�
 | P3 | mul 的操作数是宽缓冲的窗口视图 | 多数行清零/垃圾 | 每窗口先 `T.copy` 进专用缓冲 |
 | P4 | add 目标是宽累加器的列切片区域 | 第 1 行起损坏 | 只做全宽累加（y 段因此 chunk=h=1024） |
 
+### 手写 Ascend C 独立算子 LitePreHeads（`ascendc_lite_pre/`，方案 E）
+
+方案 C 结论的落地：按 vllm-ascend 自定义算子模板手写、但**不进 CANN
+安装、不进 cann-ops 仓**——`sync_and_build.sh` 把源码投递到一份 cann-ops
+clone 里借其构建系统出 `.run` 包，解出的 vendor 树放在
+`<clone>/build_out`，运行期只靠 `export ASCEND_CUSTOM_OPP_PATH=<clone>/build_out`
+生效：`GetCustOpApiHandlers` 会先于 libopapi.so 在该路径 dlopen
+`libcust_opapi.so`，aclnn 符号即被接住。全程无需 root、不碰任何 CANN 文件。
+
+算子形态（`LitePreHeads`，4 输入 4 输出，bf16 x/logits + fp32
+scale[32]/base[32]）：
+
+- 单 AIV kernel，每向量核一次吃 8 个 token 走完全程：pass1 RMS 平方和
+  （chunk 循环 + 标量寄存器累加）→ 三头（sigmoid / 2·sigmoid / softmax，
+  全 fp32）→ y 混合（Σ h_pre[i]·x_i）→ 单次 MTE3 写回；
+- 与方案 C 相同的 RMSNorm 线性折叠（gamma 进 W'），GEMM 在算子外由
+  torch matmul 完成，算子只吃 raw x 与 raw logits；
+- scale 按车道展开成 [32]（s0×4|s1×4|s2×24，模型常量一次构建），使核内
+  三个头窗口全部落在 32B 对齐边界；
+- 逐 token 标量（rstd、s0/s1/s2、h_pre 值）走 `GetValue`+`Muls` 标量寄存器
+  路径——tilelang 表达不了的形态（其 axpy 元素标量即 P2 静默错误）。
+
+写 kernel 的两条硬约束（踩过，README 留档）：
+
+1. **向量指令的 UB 窗口基址必须 32B（8 fp32 lane）对齐**，4B 偏移即全核
+   "UB address not aligned" 异常；
+2. **多行窗口化的 repeat 形态二元 op（带 BinaryRepeatParams 的跨行
+   broadcast）在本场景不可用**：第 0 行精确、其余行垃圾（P2/P3 探针证据，
+   `probe_ascendc_stages.py`）。规避方式是把所有头运算降级为逐行、
+   32B 对齐窗口上的简单 count 形态——与 tilelang 校验过的发射完全同型；
+   pre/post 两头共享 l32[0:8] 对齐窗，用 s0/s1 两个标量 pass 分别求值
+   （pass A 留 0:4 车道、pass B 留 4:8 车道），res 头读 l32[8:32]。
+
+精度（vs fp32 torch 参考，S=4096 / hc=4 / h=1024）：
+
+| 输出 | 方案 E 全链 | 现行 triton 链（噪声底） |
+| --- | --- | --- |
+| y | 3.0e-02 | 4.3e-02 |
+| h_pre | **5.6e-05** | 2.0e-03 |
+| h_post | 1.0e-04 | 1.1e-04 |
+| h_res | 3.7e-05 | 4.2e-05 |
+
+三段探针（scale=0/1/real，`probe_ascendc_stages.py`）逐级验证 P1 常数
+精确、P2/P3 各头全行对齐。注意 P1 的 y 期望是 0.5·Σxᵢ（h_pre 恒 0.5 时
+四个头全加权和），不是 0.5·x₀。
+
+计时（同 shape）：
+
+| 项 | ms |
+| --- | --- |
+| W' = W*gamma 广播乘 | 0.030 |
+| GEMM（不含 W'） | 0.036 |
+| **LitePreHeads 算子单独** | **0.170**（tilelang 2-D kernel 0.424 的 40%） |
+| 现行链（rms+GEMM+K1ab） | 0.606 |
+| **方案 E 全链（W'+GEMM+op+mix）** | **0.345** |
+| aclnn mhc_pre_sinkhorn fwd（full 语义，参照） | 0.639 |
+
+结论：**kernel 与 e2e 同时成立**——op 单独 0.170 ms、全链 0.345 ms，比
+现行链快 43%、比 aclnn 融合参照（full 语义口径）快 46%，且精度全面不差
+于现行链。剩余空间：GEMM 折进算子（AIC 段）与配套反向（独立 op 或
+autograd.Function 包 triton 反向）。
+
 ### sinkhorn（full MHC res 头）各实现对比（`bench_sinkhorn.py`）
 
 同口径对比：logits [4096,16] fp32 → softmax(s·l+b)+eps → 初始列归一 →
@@ -508,6 +571,10 @@ PYTHONPATH=<tilelang-ascend clone> LD_LIBRARY_PATH=<conda env>/lib:$LD_LIBRARY_P
   python experiments/mhc_lite/bench_tilelang_lite_pre.py
 PYTHONPATH=<tilelang-ascend clone> LD_LIBRARY_PATH=<conda env>/lib:$LD_LIBRARY_PATH \
   python experiments/mhc_lite/probe_tilelang_miscompiles.py
+# 方案 E：手写 Ascend C 独立算子（先构建；bench/probe 脚本自带 env 注入）
+bash experiments/mhc_lite/ascendc_lite_pre/sync_and_build.sh
+python experiments/mhc_lite/probe_ascendc_stages.py
+python experiments/mhc_lite/bench_ascendc_lite_pre.py
 # sinkhorn 各实现对比（tilelang 段同样需要源码构建，缺失时自动跳过）
 PYTHONPATH=<tilelang-ascend clone> LD_LIBRARY_PATH=<conda env>/lib:$LD_LIBRARY_PATH \
   python experiments/mhc_lite/bench_sinkhorn.py
