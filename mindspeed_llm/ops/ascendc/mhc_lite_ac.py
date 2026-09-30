@@ -3,20 +3,27 @@
 
 Forward: W' = weight * gamma folded RMSNorm linearity, one raw-logits GEMM
 (x @ W'^T) and the fused Ascend C op (RMS square-sum, three heads, y
-mixture -- see experiments/mhc_lite/ascendc_lite_pre/).  Backward reuses
-the scheme-B triton kernels: lite_pre_backward consumes the normalized
-logits l = logits_raw * rstd (bitwise the values the op used, since the
-bf16->fp32 cast and the rstd multiply are exact) and lite_grad_x adds the
-y-mixture term to the rstd-path gradient.  The GEMM / W' / h_res-mix
-vjp's stay outside the autograd.Function and are derived by autograd
-itself, so dW/dgamma/dscale flow through ordinary torch ops.
+mixture -- see experiments/mhc_lite/ascendc_lite_pre/).  Backward has two
+switchable implementations:
 
-Activation contract across the fwd/bwd implementation split: the triton
-backward never reads forward intermediates -- the sigmoid/softmax
-derivatives are expressed through the forward OUTPUTS (sigma' = h(1-h),
-the softmax jacobian through coeff), the extra inputs are the raw bf16
-x/logits plus the op's fp32 rstd output, so there is no recompute
-divergence between the two implementations.
+  MHC_LITE_ASCENDC_GRAD=1 (task #26): one Ascend C LitePreGrad op produces
+      grad_logits/grad_x/dscale/dbase from the saved bf16 x/logits and the
+      op's fp32 rstd/h_pre; dscale comes back already divided by its group
+      lane count.
+  default: the scheme-B triton kernels -- lite_pre_backward consumes the
+      normalized logits l = logits_raw * rstd (bitwise the values the op
+      used, since the bf16->fp32 cast and the rstd multiply are exact) and
+      lite_grad_x adds the y-mixture term to the rstd-path gradient.
+
+The GEMM / W' / h_res-mix vjp's stay outside the autograd.Function and are
+derived by autograd itself, so dW/dgamma/dscale flow through ordinary
+torch ops.
+
+Activation contract across the fwd/bwd implementation split: neither
+backward reads forward intermediates beyond rstd/h_pre -- the sigmoid/
+softmax derivatives are recomputed from the bf16 raw logits exactly the
+way the forward op computed them, so there is no recompute divergence
+between the implementations.
 """
 
 import os
@@ -32,7 +39,25 @@ from mindspeed_llm.ops.triton.mhc_lite_heads import (
 )
 
 _EXT = None
+_EXT_GRAD = None
 _LANE_IDX = {}
+
+
+def _load_ext(name, src):
+    from torch.utils.cpp_extension import load
+
+    torch_npu_dir = Path(torch_npu.__file__).parent
+    return load(
+        name=name,
+        sources=[str(src)],
+        extra_include_paths=[
+            str(torch_npu_dir / 'include'),
+            str(torch_npu_dir / 'include/third_party/acl/inc'),
+            '/usr/local/Ascend/cann-9.1.1/python/site-packages/cann_ops_transformer/common/inc',
+        ],
+        extra_ldflags=[f'-L{torch_npu_dir}/lib', '-ltorch_npu'],
+        verbose=False,
+    )
 
 
 def _ext():
@@ -45,25 +70,30 @@ def _ext():
             'vendor tree built by '
             'bash experiments/mhc_lite/ascendc_lite_pre/sync_and_build.sh '
             '(set it before importing torch_npu)')
-    from torch.utils.cpp_extension import load
-
     repo = Path(__file__).resolve().parents[3]
     src = repo / 'experiments/mhc_lite/ascendc_lite_pre/extension.cpp'
     if not src.exists():
         raise RuntimeError(f'LitePreHeads extension source missing: {src}')
-    torch_npu_dir = Path(torch_npu.__file__).parent
-    _EXT = load(
-        name='ascendc_lite_pre_ext',
-        sources=[str(src)],
-        extra_include_paths=[
-            str(torch_npu_dir / 'include'),
-            str(torch_npu_dir / 'include/third_party/acl/inc'),
-            '/usr/local/Ascend/cann-9.1.1/python/site-packages/cann_ops_transformer/common/inc',
-        ],
-        extra_ldflags=[f'-L{torch_npu_dir}/lib', '-ltorch_npu'],
-        verbose=False,
-    )
+    _EXT = _load_ext('ascendc_lite_pre_ext', src)
     return _EXT
+
+
+def _ext_grad():
+    global _EXT_GRAD
+    if _EXT_GRAD is not None:
+        return _EXT_GRAD
+    if not os.environ.get('ASCEND_CUSTOM_OPP_PATH'):
+        raise RuntimeError(
+            'MHC_LITE_ASCENDC_GRAD needs ASCEND_CUSTOM_OPP_PATH pointing at '
+            'the vendor tree built by '
+            'bash experiments/mhc_lite/ascendc_lite_pre_grad/sync_and_build.sh '
+            '(set it before importing torch_npu)')
+    repo = Path(__file__).resolve().parents[3]
+    src = repo / 'experiments/mhc_lite/ascendc_lite_pre_grad/extension.cpp'
+    if not src.exists():
+        raise RuntimeError(f'LitePreGrad extension source missing: {src}')
+    _EXT_GRAD = _load_ext('ascendc_lite_pre_grad_ext', src)
+    return _EXT_GRAD
 
 
 def _lane_idx(device):
@@ -109,6 +139,23 @@ class _LitePreAscendCFn(torch.autograd.Function):
         sb, eh = xf.shape
         h = eh // 4
 
+        if os.environ.get('MHC_LITE_ASCENDC_GRAD') == '1':
+            # whole backward in one op; dscale arrives already divided by
+            # its group lane count, so the gather needs no correction
+            grad_logits, grad_x, dscale3, dbase = _ext_grad().lite_pre_grad(
+                grad_y,
+                xf,
+                grad_h_post.contiguous(),
+                grad_h_res.contiguous(),
+                perm_t,
+                logits,
+                rstd,
+                hpre8,
+                scale32,
+                base32,
+            )
+            return grad_x, grad_logits, dscale3[_lane_idx(xf.device)], dbase, None, None
+
         # l = logits_raw * rstd: the exact values the op differentiated along
         l = logits.float() * rstd.unsqueeze(-1)
         dl, dscale3, dbase = lite_pre_backward(
@@ -138,10 +185,11 @@ class _LitePreAscendCFn(torch.autograd.Function):
 
 def lite_pre_ascendc(x, weight, gamma, scale, base, perm_flat, perm_t, eps):
     """x [s,b,e,h] -> (y, h_post, h_res), the MHCLite.hc_pre protocol on the
-    standalone Ascend C op.  bf16 streams only; requires triton (the
-    backward kernels) and the built custom op."""
-    if not TRITON_AVAILABLE:
-        raise RuntimeError('MHC_LITE_ASCENDC needs triton for its backward')
+    standalone Ascend C op.  bf16 streams only; requires the built custom
+    op (and, without MHC_LITE_ASCENDC_GRAD=1, triton for the backward)."""
+    if not TRITON_AVAILABLE and os.environ.get('MHC_LITE_ASCENDC_GRAD') != '1':
+        raise RuntimeError('MHC_LITE_ASCENDC needs triton for its backward'
+                           ' (or MHC_LITE_ASCENDC_GRAD=1)')
     s, b, e, h = x.shape
     sb = s * b
     xf = x.reshape(sb, e * h)
