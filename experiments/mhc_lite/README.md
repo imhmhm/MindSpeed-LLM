@@ -148,6 +148,8 @@ O(1) 量级，阈值 2e-2。两级都过才算数——快但不对直接出局�
 | D | post 直连算子 + 输出视图（免 wrapper 的输出 clone；B=1 时输入 permute 本就是零成本视图） | A5 实测 | e2e fwd −0.055（≈clone 成本）；反向无收益——clone 的 vjp 是恒等映射（不发生梯度拷贝），实测 fwd+bwd 持平。B>1 时输出是非连续视图，主线采用前需过 pipeline 冒烟 |
 | C | Ascend C 自定义 lite_pre 融合算子（无 sinkhorn 版 hc_pre：AIV cast→AIC GEMM→vector 三头+y） | vllm-ascend hc_pre 模板；tilelang-ascend 原型 | tilelang 原型已做（见下节）：单 kernel 0.424 ms、精度全部低于现行链噪声底，但 e2e 0.648 vs 现行链 0.574——W' 重建 + launch 间隙吃掉 kernel 收益；进 0.4 ms 须手写 Ascend C |
 | E | **手写 Ascend C 独立算子 LitePreHeads**（standalone 部署，不进 CANN 安装）：单 AIV kernel 折叠 rms 平方和+三头+y+rstd 输出，aclnn 接口；配套反向 = autograd.Function 包 op + triton 反向（l 逐位同 op 内部） | 方案 C 结论 + vllm-ascend 部署形态 | **前向 op 0.170 ms（tilelang 2.5×）、全链 0.345（−43%）**；e2e fwd 0.847（lite-ac3，比 t3 −10%）；反向暂缓 0.9 ms（torch 胶水，任务 #26 靶子）；梯度 kernel 级 5.96e-08、e2e 门全形状 PASS，见方案 E 节 |
+| F | GEMM 折进 Ascend C 算子（AIC 上 Matmul API、C tile 落 UB 同核消费 epilogue） | matmul_leakyrelu 样板 | **负结果**：精度全过（四形状 h_pre ≤4.1e-05）但算子 0.838 ms——910B4 是 40 AIV+20 AIC，epilogue 被压到 16 个 AIC 向量段（每核 2.5× 行数），纯 AIC 融合地板 ~0.43 已输 E 拆分 0.343；正确分工 = E 拆分本身，见 F/G 节 |
+| G | **launch 融合**：一个 pybind 调用串 W'+GEMM+LitePreHeads+h_res，无新 kernel | 组件和 vs 全链差的归因 | **全链 0.343→0.306（−11%，vs 现行 triton 链 −40%）**，输出与 E 逐位一致；56 次/iter ≈ −11 ms/iter，见 F/G 节 |
 
 结论：**A+B+D（lite-t3）e2e fwd+bwd 2.768 ms，比 full-cann fused 2.923
 快 5.3%**，两级门卡与 `triton_parity_test.py` 全 PASS。与 30-iter 实测
@@ -159,8 +161,9 @@ O(1) 量级，阈值 2e-2。两级都过才算数——快但不对直接出局�
 - Tier 2（已实现）：launch/python 开销与中间量物化的消除（见下节）；
 - backlog：调研比 lite 更高效的开源 MHC 变体（TileKernels/sglang/vLLM/CANN
   上游）并择优吸收；~~CANN 侧 lite 版融合 pre 算子~~（方案 E 已做 standalone
-  前向+配套 triton 反向，见下；剩余：AIC GEMM 折进算子（任务 #25）、反向
-  Ascend C 化（任务 #26））。
+  前向+配套 triton 反向，见下；~~AIC GEMM 折进算子~~（任务 #25 已结：F 负
+  结果 + G launch 融合 0.306，见 F/G 节）；剩余：反向 Ascend C 化
+  （任务 #26））。
 
 ## Tier 2：差距归因与消除（`MHC_LITE_TRITON=1`）
 
@@ -499,6 +502,79 @@ torch 侧胶水——lite_pre_backward 本身 0.812 ms（与 t3 共用），E �
 实测反向 2.93 ms）。**前向已净赢（e2e fwd −10%）**；反向胶水正是任务
 #26（反向 Ascend C 化）的靶子，届时整段并入一个算子。
 
+### 方案 F/G：AIC+AIV 联合实验（任务 #25，`ascendc_lite_pre_fused/`）
+
+E 链的组件和是 0.234 ms（W' 0.028 + GEMM 0.030 + op 0.173）而全链实测
+0.343 ms——0.11 ms 是三次 launch 的间隙。两条路：把 GEMM 折进算子吃掉
+logits 的 GM 往返（方案 F），或只折叠 launch 间隙（方案 G）。
+
+**方案 F（`LitePreFused`）**：Ascend C Matmul API 跑
+`x @ W'^T`（bf16 cube，B 侧 `[N,K]` 布局须在 tiling 的 `SetBType` 第 4 参
+与 kernel 的 `SetTensorB(_, true)` 两处同时声明转置），C 落 VECIN，每个
+`[128,32]` fp32 tile 直接进本核 UB，同核向量段就地做 rstd/三头/y/bf16 l
+回存——logits 不过 GM，W'=W⊙γ 在算子外（γ 是 K 维参数，折不进 32 车道
+的输出 scale）。γ 折叠这一步先于实现被否掉：l_j=Σ_k γ_k x_k W_jk 只能进
+B 侧权重，不能进 per-lane 缩放。
+
+Matmul API 集成中踩的三个坑（都对在 `matmul_leakyrelu` 样板里有对照）：
+
+1. **tiling 拒小 M**：`SetDim(20)` 下 M=256/512/1033 连 auto tiling 都拒
+   ——N=32 永不分裂，可用并行度只有 M 分块数，`dim = min(aicNum,
+   ceil(M/128))` 后全形状通过；
+2. **singleCoreM 非 baseM 整数倍**：M=4096 时 lib 给 205（4096/20 上取
+   整），每核 Iterate 只出 205/128=1 个整 tile，核内 128:205 行没人写
+   （首测 l 全垃圾的假象来源之一其实是这个 + 第 3 条叠加）；GetTiling 后
+   强制 `singleCoreM = baseM * ceil(mBlocks/dim)`（=256，16 核×256 行），
+   kernel 侧镜像同一公式并跳过闲置核（blockIdx ≥ mSingleBlocks 直接返回，
+   否则回绕到别人已算的块上写重复数据）；
+3. **epilogue 忘了装载 C tile**：v3.1 的 l32 原本从 GM `DataCopy` 输入，
+   换成 C tile 窗口后这一句丢了，整段读未初始化 UB——`probe_fused_c_layout.py`
+   用「回存的 l ÷ 自身 rstd（rstd 独立验证过 1.2e-07）」还原出未缩放 C，
+   4096/4096 行命中 `x@W'^T`（md 3.1e-03，bf16 GEMM 本底），同时排除
+   B 转置语义反/tile 转置两类假设。
+
+精度（`bench_ascendc_lite_pre_fused.py`，vs fp32 参考）：4096×1024、
+1033×1024（尾块）、512×1024、4096×512 四形状 h_pre ≤4.1e-05、
+coeff ≤3.1e-05、l(bf16 回存, rel) ≤4.4e-03——与 E 拆分链同级。
+
+但计时是**负结果**：
+
+| 项 | ms |
+| --- | --- |
+| LitePreFused 算子单独 | 0.838 |
+| 方案 F 全链 | 0.847 |
+| （对照）E 组件和 / 全链 | 0.234 / 0.343 |
+
+原因在核型配比：910B4 是 **40 AIV + 20 AIC**。E 的 epilogue 用满 40 个
+AIV（4096 行 / 40 核 = 102 行/核，0.173 ms）；F 的 epilogue 只能跑在
+16 个 AIC 的向量段上（baseM 整数倍切分下 M=4096 至多 16 核 × 256 行，
+每核 2.5× 行数，且与 GEMM 串行）。即便完美流水（cube 算下一段时 vector
+算当前段）、即便 AIC 向量段与 AIV 同速，纯 AIC 融合的地板也是
+0.173×40/16 ≈ 0.43 ms，已经输给 E 拆分链 0.343。**AIC 与 AIV 的正确分工
+就是 E 的拆分本身：GEMM 归 cube、epilogue 归 vector**；混合核型单 kernel
+（cube 段产 tile、vector 段消费，跨核同步）理论上限 ~0.21-0.25 ms，但
+相对 G 的复杂度不成比例，不追。
+
+另记一个同任务的负结果（v3.2b，已回退）：把三头改成 256 车道平铺的
+依赖链（Mul→Add→Muls→Exp→Add→Div→Muls）比按行交错的小窗口操作慢
+0.170→0.239 ms——向量管线上长依赖链吃不满发射，按行小窗口（标量走
+寄存器）才是这台 910B4 的甜区。
+
+**方案 G（launch 融合，`ascendc_lite_pre/extension.cpp` 的
+`lite_pre_chain`）**：不写新 kernel，把 W' 广播乘、logits GEMM、
+LitePreHeads、h_res 小 GEMM 四步并进一个 pybind 调用，C++ 内连发 aclnn，
+Python/派发往返只付一次：
+
+| 项 | ms |
+| --- | --- |
+| 方案 G 全链 | **0.306** |
+| （对照）E 拆分链 / 现行 triton 链 / aclnn full 参照 | 0.343 / 0.509 / 0.636 |
+
+输出与 E 逐位一致（h_res md 0.0e+00，同一批 kernel）。0.343→0.306
+（−11%）；对现行 triton 链 −40%。56 次/iter 折算 ≈ −11 ms/iter。剩余
+0.07 ms 是流上 kernel 间空隙与 dispatcher 分配，只能靠真融合（E+G 之上
+没有更便宜的确定性收益了，F 已证伪）。
+
 ### sinkhorn（full MHC res 头）各实现对比（`bench_sinkhorn.py`）
 
 同口径对比：logits [4096,16] fp32 → softmax(s·l+b)+eps → 初始列归一 →
@@ -626,6 +702,11 @@ python experiments/mhc_lite/bench_ascendc_lite_pre.py
 python experiments/mhc_lite/probe_ascendc_bwd_stages.py
 # 方案 E 反向分段计时（torch 胶水归因，任务 #26 依据）
 python experiments/mhc_lite/probe_ascendc_bwd_perf.py
+# 方案 F/G（任务 #25）：双算子一次构建（lite_pre_heads+lite_pre_fused 同包），
+# C tile 布局定位探针 + F 精度/计时 + G launch 融合链对比
+bash experiments/mhc_lite/ascendc_lite_pre_fused/sync_and_build.sh
+python experiments/mhc_lite/probe_fused_c_layout.py
+python experiments/mhc_lite/bench_ascendc_lite_pre_fused.py
 # sinkhorn 各实现对比（tilelang 段同样需要源码构建，缺失时自动跳过）
 PYTHONPATH=<tilelang-ascend clone> LD_LIBRARY_PATH=<conda env>/lib:$LD_LIBRARY_PATH \
   python experiments/mhc_lite/bench_sinkhorn.py
