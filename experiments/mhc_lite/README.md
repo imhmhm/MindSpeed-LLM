@@ -92,7 +92,17 @@ dpost 6.0e-07 / dcomb 0。
 | mhc_lite Tier-0（torch 链） | ~4210 | 37.1–37.7 | 5.857 | 0.314 |
 | mhc_lite Tier-1（triton） | ~4005 | 37.9–39.5 | 5.856 | 0.313 |
 | mhc_lite Tier-2（triton） | ~3767 | 41.8–42.2 | 5.857 | 0.313 |
-| **Tier-2 + 原生 post 反向** | **~3583** | 42.8–44.3 | 5.856 | 0.313 |
+| Tier-2 + 原生 post 反向 | ~3583 | 42.8–44.3 | 5.856 | 0.313 |
+| **最终栈（E+G+H+A+D）** | **~3350** | 46.7–47.2 | 5.857 | 0.313 |
+
+最终栈 30-iter（`debug-webstudio_pretrain_ailab_slm_mhclite_finalstack.sh`，
+2026-10-01）：loss 19.36→5.8566 单调下降、无 NaN/跳过迭代，iter30 loss
+5.8566/grad norm 0.313 与全部基线一致（Tier-2 5.856/0.313、full MHC
+5.859/0.311）；稳态中位数 ~3330 ms/iter（iter21 一次 4.5 s 离群，均值
+3398），比 Tier-2+原生 post 反向快 ~240 ms/iter（−6.6%）、比 full MHC
+fused 快 ~330 ms/iter（−9%），TFLOP/s/GPU 46.7–47.2。这是 standalone
+三算子 vendor tree（ASCEND_CUSTOM_OPP_PATH）首次在 4 卡训练作业落地，
+torch_npu import 前注入 env 即可，无需改 CANN 安装。
 
 Tier-2 + 原生 post 反向（`MHC_LITE_TRITON=1 MHC_LITE_NATIVE_POST_BWD=1`）
 比 full MHC 快约 2.7%——融合度拉平后，lite 免去 sinkhorn 迭代的优势开始
