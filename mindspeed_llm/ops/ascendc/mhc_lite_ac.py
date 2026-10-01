@@ -10,6 +10,11 @@ switchable implementations:
       grad_logits/grad_x/dscale/dbase from the saved bf16 x/logits and the
       op's fp32 rstd/h_pre; dscale comes back already divided by its group
       lane count.
+  +MHC_LITE_ASCENDC_CHAIN=1 (G/H merge): the forward runs as the scheme-G
+      one-call chain (W' + logits GEMM + op + h_res, weight/gamma passed
+      into the Function instead of precomputed logits) and the whole
+      backward chain -- grad op, both GEMM vjps, the W' vjps and the
+      dscale lane gather -- issues from one extension call.
   default: the scheme-B triton kernels -- lite_pre_backward consumes the
       normalized logits l = logits_raw * rstd (bitwise the values the op
       used, since the bf16->fp32 cast and the rstd multiply are exact) and
@@ -117,17 +122,33 @@ def _inv_lane_count(device):
     return _INV_LANE_COUNT[device]
 
 
-class _LitePreAscendCFn(torch.autograd.Function):
-    """Fused Ascend C lite-pre forward with the scheme-B triton backward.
+def _chain():
+    # G/H merge: one extension call per direction (forward chain + whole
+    # backward chain); reads env at call time so a process can toggle it
+    return os.environ.get('MHC_LITE_ASCENDC_CHAIN') == '1'
 
-    Inputs are the flattened streams, the raw bf16 logits (x @ W'^T) and the
-    fp32 scale/base vectors; h_pre stays inside so the y-path dots in
-    lite_pre_bwd_kernel are the complete dh_pre.  Returns (y, h_post, h_res).
+
+class _LitePreAscendCFn(torch.autograd.Function):
+    """Fused Ascend C lite-pre forward with a switchable backward.
+
+    Inputs are the flattened streams, the fp32 scale/base vectors and the
+    permutation tables; slot a/b carry either the raw bf16 logits (W' GEMM
+    left outside, autograd derives its vjp) or, with
+    MHC_LITE_ASCENDC_CHAIN=1, the bf16 weight/gamma pair (the forward
+    chain and the whole backward chain each issue as one extension call).
+    h_pre stays inside so the y-path dots are the complete dh_pre.
+    Returns (y, h_post, h_res).
     """
 
     @staticmethod
-    def forward(ctx, xf, logits, scale32, base32, perm_flat, perm_t):
+    def forward(ctx, xf, a, b, scale32, base32, perm_flat, perm_t):
         sb = xf.shape[0]
+        if _chain():
+            y, hpre8, hpost8, coeff, rstd, h_res, logits = _ext().lite_pre_chain(
+                xf, a, b, scale32, base32, perm_flat)
+            ctx.save_for_backward(xf, a, b, hpre8, rstd, perm_t, logits, scale32, base32)
+            return y, hpost8[:, 4:].contiguous(), h_res
+        logits = a
         y, hpre8, hpost8, coeff, rstd = _ext().lite_pre_heads(xf, logits, scale32, base32)
         h_res = torch.matmul(coeff[:, 8:], perm_flat)
         ctx.save_for_backward(xf, logits, hpre8, rstd, perm_t, scale32, base32)
@@ -135,6 +156,24 @@ class _LitePreAscendCFn(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_y, grad_h_post, grad_h_res):
+        if _chain():
+            xf, wbf, gbf, hpre8, rstd, perm_t, logits, scale32, base32 = ctx.saved_tensors
+            grad_x, grad_w, grad_g, grad_s, grad_b = _ext_grad().lite_pre_train_backward(
+                grad_y,
+                grad_h_post.contiguous(),
+                grad_h_res.contiguous(),
+                xf,
+                wbf,
+                gbf,
+                perm_t,
+                logits,
+                rstd,
+                hpre8,
+                scale32,
+                base32,
+            )
+            return grad_x, grad_w, grad_g, grad_s, grad_b, None, None
+
         xf, logits, hpre8, rstd, perm_t, scale32, base32 = ctx.saved_tensors
         sb, eh = xf.shape
         h = eh // 4
@@ -154,7 +193,7 @@ class _LitePreAscendCFn(torch.autograd.Function):
                 scale32,
                 base32,
             )
-            return grad_x, grad_logits, dscale3[_lane_idx(xf.device)], dbase, None, None
+            return grad_x, grad_logits, None, dscale3[_lane_idx(xf.device)], dbase, None, None
 
         # l = logits_raw * rstd: the exact values the op differentiated along
         l = logits.float() * rstd.unsqueeze(-1)
@@ -180,24 +219,29 @@ class _LitePreAscendCFn(torch.autograd.Function):
                              coef * xf.view(sb, 4, h)).view(sb, eh)
 
         grad_scale32 = dscale3[_lane_idx(xf.device)] * _inv_lane_count(xf.device)
-        return grad_x, grad_logits, grad_scale32, dbase, None, None
+        return grad_x, grad_logits, None, grad_scale32, dbase, None, None
 
 
 def lite_pre_ascendc(x, weight, gamma, scale, base, perm_flat, perm_t, eps):
     """x [s,b,e,h] -> (y, h_post, h_res), the MHCLite.hc_pre protocol on the
     standalone Ascend C op.  bf16 streams only; requires the built custom
-    op (and, without MHC_LITE_ASCENDC_GRAD=1, triton for the backward)."""
+    op (and, without MHC_LITE_ASCENDC_GRAD=1, triton for its backward)."""
     if not TRITON_AVAILABLE and os.environ.get('MHC_LITE_ASCENDC_GRAD') != '1':
         raise RuntimeError('MHC_LITE_ASCENDC needs triton for its backward'
                            ' (or MHC_LITE_ASCENDC_GRAD=1)')
     s, b, e, h = x.shape
     sb = s * b
     xf = x.reshape(sb, e * h)
-    # W' = W * gamma: 128x smaller than the xn materialization of the
-    # triton path, and the gamma vjp is autograd's broadcast-mul backward
-    wp = weight.type_as(x) * gamma.type_as(x).view(1, -1)
-    logits = torch.matmul(xf, wp.t())
     scale32 = scale.float()[_lane_idx(x.device)]
-    y, h_post, h_res = _LitePreAscendCFn.apply(
-        xf, logits, scale32, base.float(), perm_flat, perm_t)
+    if _chain():
+        y, h_post, h_res = _LitePreAscendCFn.apply(
+            xf, weight.type_as(x), gamma.type_as(x), scale32, base.float(),
+            perm_flat, perm_t)
+    else:
+        # W' = W * gamma: 128x smaller than the xn materialization of the
+        # triton path, and the gamma vjp is autograd's broadcast-mul backward
+        wp = weight.type_as(x) * gamma.type_as(x).view(1, -1)
+        logits = torch.matmul(xf, wp.t())
+        y, h_post, h_res = _LitePreAscendCFn.apply(
+            xf, logits, None, scale32, base.float(), perm_flat, perm_t)
     return y.view(s, b, h), h_post.view(s, b, e), h_res.view(s, b, e, e)
