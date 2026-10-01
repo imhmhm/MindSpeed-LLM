@@ -151,10 +151,11 @@ O(1) 量级，阈值 2e-2。两级都过才算数——快但不对直接出局�
 | F | GEMM 折进 Ascend C 算子（AIC 上 Matmul API、C tile 落 UB 同核消费 epilogue） | matmul_leakyrelu 样板 | **负结果**：精度全过（四形状 h_pre ≤4.1e-05）但算子 0.838 ms——910B4 是 40 AIV+20 AIC，epilogue 被压到 16 个 AIC 向量段（每核 2.5× 行数），纯 AIC 融合地板 ~0.43 已输 E 拆分 0.343；正确分工 = E 拆分本身，见 F/G 节 |
 | G | **launch 融合**：一个 pybind 调用串 W'+GEMM+LitePreHeads+h_res，无新 kernel | 组件和 vs 全链差的归因 | **全链 0.343→0.306（−11%，vs 现行 triton 链 −40%）**，输出与 E 逐位一致；56 次/iter ≈ −11 ms/iter，见 F/G 节 |
 | H | **反向 Ascend C 化**：单 AIV kernel `LitePreGrad` 吃掉 E 反向的全部 triton 段与 torch 胶水（三头 jacobian/dcoeff 折入/rstd 链/grad_x/dscale 修正），GEMM 留 autograd | E 节反向归因（胶水占 1.2-1.6 ms） | 算子 0.356 ms（替换段 1.204）；pre fwd+bwd ac→acg **−1.1 ms（−40%）**；lite-ac4 e2e fwd+bwd **2.27 ms（比 t3 −17%、比 full-cann −22%）**，精度见方案 H 节 |
+| I | **G/H 合流**：fwd 整链与 bwd 整链（grad 算子+GEMM vjp+W' vjp+dscale gather）各一次 pybind 调用，kernel 同批 | G 的 launch 融合推广到反向 | pre 级每调用 −0.06~0.08 ms；lite-ac5（最终栈）pre fwd 0.61 / fwd+bwd 1.62 / e2e fwd+bwd ~2.26，见 H 节合流段 |
 
-结论：**E+H+A+D（lite-ac4）e2e fwd+bwd 2.27 ms，比 full-cann fused 2.923
-快 22%**，两级门卡全 PASS（`bench_lite_e2e.py` lite-acg / lite-ac4）。pre
-级组件口径下 lite 已越过 fused 算子基线一个身位。
+结论：**E+G+H+A+D（lite-ac5，最终栈）e2e fwd+bwd ~2.26 ms，比 full-cann
+fused 2.923 快 23%**，两级门卡全 PASS（`bench_lite_e2e.py` lite-acg /
+ac4 / ac5）。pre 级组件口径下 lite 已越过 fused 算子基线一个身位。
 
 ## 后续（tier 计划）
 
@@ -633,6 +634,24 @@ ac→acg **−1.1 ms（−40%）**，56 次/iter 折算 ≈ −60 ms/iter；ac4 
 fused 2.923 **−22%**。pre 反向剩余 1.1 ms 里约 0.6 ms 是两条 GEMM 与
 autograd 自身的 wp vjp/launch（probe_ascendc_bwd_perf 口径），已到
 AIC 之外的可压缩下限。
+
+#### G/H 合流（`MHC_LITE_ASCENDC_CHAIN=1`，lite-ac5）
+
+G 的 launch 融合从前向扩到反向：forward 整链 = 一次 `lite_pre_chain`
+（W'+GEMM+算子+h_res，raw logits 随链返回），backward 整链 = 一次
+`lite_pre_train_backward`（aclnnLitePreGrad + d_xf/d_wp 两条 GEMM vjp +
+W' 广播乘 vjp + dscale 车道 gather，C++ 连发），Function 内外各一次
+Python 往返。kernel 与 acg 完全同一批（tier1/tier2 数值一致，两级门
+PASS）。与 ac4 交替同场实测（4096×1，ms）：
+
+| 变体 | pre fwd | pre fwd+bwd | e2e fwd+bwd |
+| --- | --- | --- | --- |
+| lite-ac4 | 0.678 / 0.678 | 1.676 / 1.692 | 2.59 / 2.34 |
+| **lite-ac5** | **0.606 / 0.627** | **1.628 / 1.610** | 2.24 / 2.28 |
+
+pre 级每调用稳定 −0.06~0.08 ms（×56 ≈ −4 ms/iter）；e2e 级差被 post 段
+跨进程噪声部分掩盖。此为 **最终栈（E+G+H+A+D）**，主线冒烟与全 shape
+精度矩阵以它为准。
 
 ### sinkhorn（full MHC res 头）各实现对比（`bench_sinkhorn.py`）
 

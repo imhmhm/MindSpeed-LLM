@@ -30,10 +30,11 @@ std::vector<at::Tensor> lite_pre_heads(const at::Tensor &x, const at::Tensor &lo
 }
 
 // Scheme G: the whole scheme-E forward chain in one binding call.  The
-// three device kernels (W' build, logits GEMM, LitePreHeads, plus the small
+// device kernels (W' build, logits GEMM, LitePreHeads, plus the small
 // h_res GEMM) are identical to the Python chain; only the per-op Python /
 // dispatch round-trips collapse into one, so the stream sees them
-// back-to-back with kernel-to-kernel gaps only.
+// back-to-back with kernel-to-kernel gaps only.  The raw bf16 logits ride
+// along for the backward chain.
 std::vector<at::Tensor> lite_pre_chain(const at::Tensor &x, const at::Tensor &w,
     const at::Tensor &gamma, const at::Tensor &scale, const at::Tensor &base,
     const at::Tensor &permFlat)
@@ -44,7 +45,7 @@ std::vector<at::Tensor> lite_pre_chain(const at::Tensor &x, const at::Tensor &w,
     auto coeff = heads[3];
     TORCH_CHECK(coeff.size(1) == 32, "res lanes expected at 8:32 of a 32-lane coeff");
     auto hRes = at::matmul(coeff.narrow(1, 8, 24), permFlat);
-    return {heads[0], heads[1], heads[2], coeff, heads[4], hRes};
+    return {heads[0], heads[1], heads[2], coeff, heads[4], hRes, logitsRaw};
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)

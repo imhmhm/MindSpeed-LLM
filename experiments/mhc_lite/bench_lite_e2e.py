@@ -35,6 +35,9 @@ Variants:
                   dscale/dbase -- in one Ascend C LitePreGrad op)
   lite-ac4        lite-acg stacked with A+D -- the fair e2e comparison
                   against lite-t3 / lite-ac3
+  lite-ac5        + MHC_LITE_ASCENDC_CHAIN=1 (G/H merge: the forward chain
+                  AND the whole backward chain each issue as one extension
+                  call) stacked with A+D -- the final stack
 """
 
 import argparse
@@ -195,7 +198,8 @@ class _EnvCleared:
     them), so a Tier-0 torch reference module can coexist with a variant."""
 
     KEYS = ('MHC_LITE_TRITON', 'MHC_LITE_NATIVE_POST_BWD', 'MHC_LITE_POST_DIRECT',
-            'MHC_LITE_TORCH_POST', 'MHC_LITE_ASCENDC', 'MHC_LITE_ASCENDC_GRAD')
+            'MHC_LITE_TORCH_POST', 'MHC_LITE_ASCENDC', 'MHC_LITE_ASCENDC_GRAD',
+            'MHC_LITE_ASCENDC_CHAIN')
 
     def __enter__(self):
         self.saved = {k: os.environ.pop(k, None) for k in self.KEYS}
@@ -436,7 +440,7 @@ def main():
     parser.add_argument('--variant', required=True,
                         choices=['full-cann', 'lite-t0', 'lite-t2', 'lite-t2-native',
                                  'lite-t2-direct', 'lite-t3', 'lite-ac', 'lite-ac3',
-                                 'lite-acg', 'lite-ac4'])
+                                 'lite-acg', 'lite-ac4', 'lite-ac5'])
     parser.add_argument('--shape', default=f'{S}x{B}', help='sxb')
     args = parser.parse_args()
 
@@ -444,17 +448,19 @@ def main():
     if args.variant == 'full-cann':
         run_full(s, b)
         return
-    if args.variant in ('lite-ac', 'lite-ac3', 'lite-acg', 'lite-ac4'):
+    if args.variant in ('lite-ac', 'lite-ac3', 'lite-acg', 'lite-ac4', 'lite-ac5'):
         os.environ['MHC_LITE_ASCENDC'] = '1'
-    if args.variant in ('lite-acg', 'lite-ac4'):
+    if args.variant in ('lite-acg', 'lite-ac4', 'lite-ac5'):
         os.environ['MHC_LITE_ASCENDC_GRAD'] = '1'
+    if args.variant == 'lite-ac5':
+        os.environ['MHC_LITE_ASCENDC_CHAIN'] = '1'
     if args.variant.startswith('lite-t2') or args.variant == 'lite-t3':
         os.environ['MHC_LITE_TRITON'] = '1'
-    if args.variant in ('lite-t2-native', 'lite-t3', 'lite-ac3', 'lite-ac4'):
+    if args.variant in ('lite-t2-native', 'lite-t3', 'lite-ac3', 'lite-ac4', 'lite-ac5'):
         os.environ['MHC_LITE_NATIVE_POST_BWD'] = '1'
-    if args.variant in ('lite-t2-direct', 'lite-t3', 'lite-ac3', 'lite-ac4'):
+    if args.variant in ('lite-t2-direct', 'lite-t3', 'lite-ac3', 'lite-ac4', 'lite-ac5'):
         os.environ['MHC_LITE_POST_DIRECT'] = '1'
-    if args.variant in ('lite-t2-native', 'lite-t3', 'lite-ac3', 'lite-ac4'):
+    if args.variant in ('lite-t2-native', 'lite-t3', 'lite-ac3', 'lite-ac4', 'lite-ac5'):
         warm_native_post(torch.bfloat16)
     run_lite(args.variant, s, b)
 
