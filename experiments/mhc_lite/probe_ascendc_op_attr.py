@@ -42,6 +42,7 @@ scale32[:4] = 0.011
 scale32[4:8] = 0.013
 scale32[8:] = 0.017
 base = (torch.randn(NL, device=DEV) * 0.5).contiguous()
+eps8 = torch.full((8,), 1e-5, device=DEV)
 
 
 def bench(fn, iters=50):
@@ -60,7 +61,7 @@ rows = []
 for sb, h in shapes:
     x = (torch.randn(sb, E * h, device=DEV) * 1.5).to(torch.bfloat16)
     logits = (torch.randn(sb, NL, device=DEV) * 0.5).to(torch.bfloat16)
-    t = bench(lambda: ext.lite_pre_heads(x, logits, scale32, base))
+    t = bench(lambda: ext.lite_pre_heads(x, logits, scale32, base, eps8))
     rows.append((sb, h, t))
     print(f'sb={sb:5d} h={h:5d}  op {t:.3f} ms')
 

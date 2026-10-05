@@ -251,10 +251,12 @@ def write_report(results, tails, dets, quick):
     L.append('- 输入制式沿用 campaign：x~randn×1.5、权重 randn×0.02、gamma 1±0.05、'
              'scale [0.011,0.013,0.017]、base randn×0.5，上游梯度 gy/gout bf16、'
              'gpost/ghres fp32。')
-    L.append('- 已知边界（如实记录，非本表发现）：算子内部 eps 固定 1e-5'
-             '（`lite_pre_ascendc` 的 eps 参数未透传，当前所有配置 norm_eps=1e-5，'
-             '数值一致；换配置需先补透传）；方案 D 在 b>1 时 post 输出为非连续视图'
-             '（本表 b=2/4 全组合即为该路径的精度证据）；aclnnMhcPostBackward '
+    L.append('- 已知边界（如实记录，非本表发现）：eps 已作为 fp32 [8]-lane 张量输入'
+             '透传进算子（每块一次 32B DataCopy + 标量加法；`probe_eps_passthrough.py`：'
+             'op 级 rstd 跟随自身 eps 公式至 1.7e-7、跨 eps 公式偏离 ≥2.3e-2，模块级 '
+             'chain/split 双路透传，放大 scale 的 mismatch 控制分离 40×）；本表在 '
+             'norm_eps=1e-5 下运行，数值与透传前一致。方案 D 在 b>1 时 post 输出为非连续'
+             '视图（本表 b=2/4 全组合即为该路径的精度证据）；aclnnMhcPostBackward '
              '首调冷启动缺陷按既有结论用一次 B=1 随机梯度 warm-up 规避。')
     L.append('')
 

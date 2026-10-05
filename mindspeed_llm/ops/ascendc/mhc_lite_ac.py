@@ -128,6 +128,18 @@ def _chain():
     return os.environ.get('MHC_LITE_ASCENDC_CHAIN') == '1'
 
 
+_EPS8 = {}
+
+
+def _eps8(device, eps):
+    # RMSNorm epsilon as an [8]-lane fp32 tensor: the kernel copies it with
+    # one 32B DataCopy (the copy granularity) and reads lane 0 as the scalar
+    if (device, float(eps)) not in _EPS8:
+        _EPS8[(device, float(eps))] = torch.full(
+            (8,), float(eps), dtype=torch.float32, device=device)
+    return _EPS8[(device, float(eps))]
+
+
 class _LitePreAscendCFn(torch.autograd.Function):
     """Fused Ascend C lite-pre forward with a switchable backward.
 
@@ -141,15 +153,16 @@ class _LitePreAscendCFn(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, xf, a, b, scale32, base32, perm_flat, perm_t):
+    def forward(ctx, xf, a, b, scale32, base32, perm_flat, perm_t, eps):
         sb = xf.shape[0]
+        eps8 = _eps8(xf.device, eps)
         if _chain():
             y, hpre8, hpost8, coeff, rstd, h_res, logits = _ext().lite_pre_chain(
-                xf, a, b, scale32, base32, perm_flat)
+                xf, a, b, scale32, base32, eps8, perm_flat)
             ctx.save_for_backward(xf, a, b, hpre8, rstd, perm_t, logits, scale32, base32)
             return y, hpost8[:, 4:].contiguous(), h_res
         logits = a
-        y, hpre8, hpost8, coeff, rstd = _ext().lite_pre_heads(xf, logits, scale32, base32)
+        y, hpre8, hpost8, coeff, rstd = _ext().lite_pre_heads(xf, logits, scale32, base32, eps8)
         h_res = torch.matmul(coeff[:, 8:], perm_flat)
         ctx.save_for_backward(xf, logits, hpre8, rstd, perm_t, scale32, base32)
         return y, hpost8[:, 4:].contiguous(), h_res
@@ -172,7 +185,7 @@ class _LitePreAscendCFn(torch.autograd.Function):
                 scale32,
                 base32,
             )
-            return grad_x, grad_w, grad_g, grad_s, grad_b, None, None
+            return grad_x, grad_w, grad_g, grad_s, grad_b, None, None, None
 
         xf, logits, hpre8, rstd, perm_t, scale32, base32 = ctx.saved_tensors
         sb, eh = xf.shape
@@ -193,7 +206,7 @@ class _LitePreAscendCFn(torch.autograd.Function):
                 scale32,
                 base32,
             )
-            return grad_x, grad_logits, None, dscale3[_lane_idx(xf.device)], dbase, None, None
+            return grad_x, grad_logits, None, dscale3[_lane_idx(xf.device)], dbase, None, None, None
 
         # l = logits_raw * rstd: the exact values the op differentiated along
         l = logits.float() * rstd.unsqueeze(-1)
@@ -219,7 +232,7 @@ class _LitePreAscendCFn(torch.autograd.Function):
                              coef * xf.view(sb, 4, h)).view(sb, eh)
 
         grad_scale32 = dscale3[_lane_idx(xf.device)] * _inv_lane_count(xf.device)
-        return grad_x, grad_logits, None, grad_scale32, dbase, None, None
+        return grad_x, grad_logits, None, grad_scale32, dbase, None, None, None
 
 
 def lite_pre_ascendc(x, weight, gamma, scale, base, perm_flat, perm_t, eps):
@@ -236,12 +249,12 @@ def lite_pre_ascendc(x, weight, gamma, scale, base, perm_flat, perm_t, eps):
     if _chain():
         y, h_post, h_res = _LitePreAscendCFn.apply(
             xf, weight.type_as(x), gamma.type_as(x), scale32, base.float(),
-            perm_flat, perm_t)
+            perm_flat, perm_t, float(eps))
     else:
         # W' = W * gamma: 128x smaller than the xn materialization of the
         # triton path, and the gamma vjp is autograd's broadcast-mul backward
         wp = weight.type_as(x) * gamma.type_as(x).view(1, -1)
         logits = torch.matmul(xf, wp.t())
         y, h_post, h_res = _LitePreAscendCFn.apply(
-            xf, logits, None, scale32, base.float(), perm_flat, perm_t)
+            xf, logits, None, scale32, base.float(), perm_flat, perm_t, float(eps))
     return y.view(s, b, h), h_post.view(s, b, e), h_res.view(s, b, e, e)

@@ -54,8 +54,9 @@ wp = (w.to(torch.bfloat16) * gamma.to(torch.bfloat16).view(1, -1))
 L = torch.matmul(xf, wp.t())
 lane = torch.tensor([0] * 4 + [1] * 4 + [2] * 24, device=DEV)
 scale32 = scale[lane]
+eps8 = torch.full((8,), EPS, device=DEV)
 
-y, hpre8, hpost8, coeff, rstd = ext.lite_pre_heads(xf, L, scale32, base)
+y, hpre8, hpost8, coeff, rstd = ext.lite_pre_heads(xf, L, scale32, base, eps8)
 l = L.float() * rstd.unsqueeze(-1)
 
 g = torch.randn(SB, H, device=DEV).to(torch.bfloat16)

@@ -86,7 +86,8 @@ def run_shape(sb, h, check=True):
         torch.tensor(list(__import__('itertools').permutations(range(E))))].flatten(1).to(DEV)
     perm_t = perm_flat.t().contiguous()
 
-    y, hpre8, hpost8, coeff, rstd = ext_e.lite_pre_heads(xf, logits, scale32, base32)
+    eps8 = torch.full((8,), 1e-5, device=DEV)
+    y, hpre8, hpost8, coeff, rstd = ext_e.lite_pre_heads(xf, logits, scale32, base32, eps8)
     h_res = torch.matmul(coeff[:, 2 * E:], perm_flat)
     g = (torch.randn(sb, h, device=DEV) * 0.05).to(torch.bfloat16)
     ghp = torch.randn(sb, E, device=DEV, dtype=torch.float32) * 0.1

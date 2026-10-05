@@ -65,6 +65,7 @@ perm_flat = torch.eye(E)[torch.tensor(
 perm_t = perm_flat.t().contiguous()
 lane = torch.tensor([0] * 4 + [1] * 4 + [2] * 24, device=DEV)
 scale32 = scale[lane]
+eps8 = torch.full((8,), EPS, device=DEV)
 
 wp = w.to(torch.bfloat16) * gamma_bf.view(1, -1)
 logits = torch.matmul(xf, wp.t())
@@ -72,7 +73,7 @@ gy = torch.randn(SB, H, device=DEV).to(torch.bfloat16)
 ghp = torch.randn(SB, E, device=DEV)
 ghr = torch.randn(SB, E * E, device=DEV)
 
-y, hpre8, hpost8, coeff, rstd = ext.lite_pre_heads(xf, logits, scale32, base)
+y, hpre8, hpost8, coeff, rstd = ext.lite_pre_heads(xf, logits, scale32, base, eps8)
 l = logits.float() * rstd.unsqueeze(-1)
 
 # scheme-E backward pieces

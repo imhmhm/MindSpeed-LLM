@@ -141,6 +141,7 @@ def main():
     w_bf = w.to(torch.bfloat16)
     wp = torch.empty_like(w_bf)
     scale32 = build_scale([scale[0, 0], scale[0, 1], scale[0, 2]])
+    eps8 = torch.full((8,), EPS, device=DEV)
     perm_flat = torch.eye(E, dtype=torch.float32)[
         torch.tensor(list(__import__('itertools').permutations(range(E))))
     ].flatten(1).to(DEV)
@@ -157,7 +158,8 @@ def main():
 
     def chain_e():
         logits_raw = torch.matmul(xf, wprime().t())
-        y, hpre8, hpost8, coeff, rstd = ext_e.lite_pre_heads(xf, logits_raw, scale32, base.view(N32))
+        y, hpre8, hpost8, coeff, rstd = ext_e.lite_pre_heads(
+            xf, logits_raw, scale32, base.view(N32), eps8)
         h_res = torch.matmul(coeff[:, 2 * E:N32], perm_flat)
         return y, hpre8[:, 0:4], hpost8[:, E:8], h_res
 
@@ -169,7 +171,7 @@ def main():
 
     def chain_g():
         y, hpre8, hpost8, coeff, rstd, hres = ext_e.lite_pre_chain(
-            xf, w_bf, gamma_bf, scale32, base.view(N32), perm_flat)
+            xf, w_bf, gamma_bf, scale32, base.view(N32), eps8, perm_flat)
         return y, hpre8[:, 0:4], hpost8[:, E:8], hres
 
     y_c, hpre_c, hpost_c, hres_c = chain_cur()
@@ -201,7 +203,7 @@ def main():
     logits_raw = torch.matmul(xf, wprime().t())
     t_wp = bench(wprime)
     t_gemm = bench(lambda: torch.matmul(xf, wp.t()))
-    t_op_e = bench(lambda: ext_e.lite_pre_heads(xf, logits_raw, scale32, base.view(N32)))
+    t_op_e = bench(lambda: ext_e.lite_pre_heads(xf, logits_raw, scale32, base.view(N32), eps8))
     t_op_f = bench(lambda: ext_f.lite_pre_fused(xf, wp, scale32, base.view(N32)))
     t_cur = bench(chain_cur)
     t_e = bench(chain_e)

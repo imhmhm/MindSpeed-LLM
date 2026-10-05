@@ -14,7 +14,7 @@ built-ins.
 #include "aclnn_common.h"
 
 std::vector<at::Tensor> lite_pre_heads(const at::Tensor &x, const at::Tensor &logits,
-    const at::Tensor &scale, const at::Tensor &base)
+    const at::Tensor &scale, const at::Tensor &base, const at::Tensor &eps)
 {
     const int64_t sb = x.size(0);
     const int64_t h = x.size(1) / 4;
@@ -25,7 +25,7 @@ std::vector<at::Tensor> lite_pre_heads(const at::Tensor &x, const at::Tensor &lo
     // the kernel always copies whole 8-token rows, so tail-block lanes past
     // sb need slack; the returned view hides it
     auto rstdPad = at::empty({(sb + 7) / 8 * 8}, scale.options());
-    ACLNN_CMD(aclnnLitePreHeads, x, logits, scale, base, y, hPre, hPost, coeff, rstdPad);
+    ACLNN_CMD(aclnnLitePreHeads, x, logits, scale, base, eps, y, hPre, hPost, coeff, rstdPad);
     return {y, hPre, hPost, coeff, rstdPad.narrow(0, 0, sb)};
 }
 
@@ -37,11 +37,11 @@ std::vector<at::Tensor> lite_pre_heads(const at::Tensor &x, const at::Tensor &lo
 // along for the backward chain.
 std::vector<at::Tensor> lite_pre_chain(const at::Tensor &x, const at::Tensor &w,
     const at::Tensor &gamma, const at::Tensor &scale, const at::Tensor &base,
-    const at::Tensor &permFlat)
+    const at::Tensor &eps, const at::Tensor &permFlat)
 {
     auto wp = at::mul(w, gamma.view({1, -1}));
     auto logitsRaw = at::matmul(x, wp.t());
-    auto heads = lite_pre_heads(x, logitsRaw, scale, base);
+    auto heads = lite_pre_heads(x, logitsRaw, scale, base, eps);
     auto coeff = heads[3];
     TORCH_CHECK(coeff.size(1) == 32, "res lanes expected at 8:32 of a 32-lane coeff");
     auto hRes = at::matmul(coeff.narrow(1, 8, 24), permFlat);
