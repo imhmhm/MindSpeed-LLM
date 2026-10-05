@@ -1,12 +1,12 @@
 # 最终栈全 shape 精度矩阵（E+G+H+A+D，lite-ac5）
 
-- 生成：`probe_finalstack_accuracy.py`，commit `01e54d06`，单卡 910B4，bf16 训练口径（h=1024，E=4，24 置换）。
+- 生成：`probe_finalstack_accuracy.py`，commit `b965ea36`，单卡 910B4，bf16 训练口径（h=1024，E=4，24 置换）。
 - 被测对象：`MHCLite.hc_pre + hc_post` 完整模块链，env 为最终栈全套（`MHC_LITE_ASCENDC/GRAD/CHAIN + NATIVE_POST_BWD + POST_DIRECT`），即 30-iter 冒烟所用的确切路径。
 - 参考一（tier2）：fp32 torch 参考 + 自带 autograd，按 8192 行分块计算（链上所有 stage 均按行独立，分块对前向与 dx 精确；参数梯度跨块 fp32 累加，仅求和顺序与整图 autograd 不同，影响在 fp32 求和噪声 ~1e-7 级）。
 - 参考二（tier1）：同一 bf16 输入上的 Tier-0 torch 孪生模块，同样分块。
 - 门卡与 `bench_lite_e2e.py` 完全一致：tier2 前向 rel ≤2e-2；5 组梯度 rel ≤5e-2，实测地板豁免（该张量上变体 vs fp32 不劣于 t0 自身距离时豁免）；tier1 ≤2e-2（仅对“变体比 t0 离 fp32 更远”的张量计费）。
 - 输入制式沿用 campaign：x~randn×1.5、权重 randn×0.02、gamma 1±0.05、scale [0.011,0.013,0.017]、base randn×0.5，上游梯度 gy/gout bf16、gpost/ghres fp32。
-- 已知边界（如实记录，非本表发现）：算子内部 eps 固定 1e-5（`lite_pre_ascendc` 的 eps 参数未透传，当前所有配置 norm_eps=1e-5，数值一致；换配置需先补透传）；方案 D 在 b>1 时 post 输出为非连续视图（本表 b=2/4 全组合即为该路径的精度证据）；aclnnMhcPostBackward 首调冷启动缺陷按既有结论用一次 B=1 随机梯度 warm-up 规避。
+- 已知边界（如实记录，非本表发现）：eps 已作为 fp32 [8]-lane 张量输入透传进算子（每块一次 32B DataCopy + 标量加法；`probe_eps_passthrough.py`：op 级 rstd 跟随自身 eps 公式至 1.7e-7、跨 eps 公式偏离 ≥2.3e-2，模块级 chain/split 双路透传，放大 scale 的 mismatch 控制分离 40×）；本表在 norm_eps=1e-5 下运行，数值与透传前一致。方案 D 在 b>1 时 post 输出为非连续视图（本表 b=2/4 全组合即为该路径的精度证据）；aclnnMhcPostBackward 首调冷启动缺陷按既有结论用一次 B=1 随机梯度 warm-up 规避。
 
 ## 主矩阵：b∈{1,2,4} × s∈{128…32768}（27 组合）
 
@@ -18,7 +18,7 @@
 | 1024×1 (1024) | 8.4e-04 | 8.7e-05 | 1.3e-06 | 2.3e-03 | 5.7e-03 | 5.8e-03 | 4.3e-03 | 8.2e-04 | 1.2e-03 | 6.0e-03 | PASS |
 | 2048×1 (2048) | 8.2e-04 | 1.1e-04 | 1.4e-06 | 2.5e-03 | 6.6e-03 | 6.1e-03 | 5.6e-03 | 4.7e-03 | 5.2e-04 | 6.4e-03 | PASS |
 | 4096×1 (4096) | 8.3e-04 | 1.1e-04 | 1.4e-06 | 3.0e-03 | 6.9e-03 | 5.1e-03 | 4.8e-03 | 5.4e-04 | 5.5e-04 | 4.0e-03 | PASS |
-| 8192×1 (8192) | 9.7e-04 | 9.6e-05 | 1.4e-06 | 2.5e-03 | 6.1e-03 | 5.6e-03 | 3.4e-03 | 4.2e-03 | 6.2e-04 | 3.9e-03 | PASS |
+| 8192×1 (8192) | 9.7e-04 | 9.6e-05 | 1.4e-06 | 2.5e-03 | 6.1e-03 | 5.6e-03 | 3.4e-03 | 4.2e-03 | 6.3e-04 | 3.9e-03 | PASS |
 | 16384×1 (16384) | 9.4e-04 | 1.1e-04 | 1.4e-06 | 3.7e-03 | 6.5e-03 | 5.3e-03 | 4.6e-03 | 3.6e-03 | 5.7e-04 | 5.4e-03 | PASS |
 | 32768×1 (32768) | 9.4e-04 | 1.0e-04 | 1.3e-06 | 3.7e-03 | 6.6e-03 | 6.2e-03 | 5.2e-03 | 4.3e-01 | 3.9e-04 | 2.8e-01 | FAIL |
 | 128×2 (256) | 8.1e-04 | 6.6e-05 | 1.1e-06 | 2.2e-03 | 5.8e-03 | 4.9e-03 | 5.3e-03 | 1.7e-03 | 5.4e-04 | 5.3e-03 | PASS |
@@ -96,11 +96,11 @@ LitePreGrad 的 dscale/dbase 以原子加归约（跨核浮点加法顺序不保
 
 | s×b | 逐位一致 | 不一致张量及重跑间偏差（对梯度幅值） |
 |---|---|---|
-| 512×1 | 否 | dscale delta 6.1e-05 / mag 6.2e+02; dbase delta 1.3e-04 / mag 5.3e+02 |
+| 512×1 | 否 | dscale delta 6.1e-05 / mag 6.2e+02; dbase delta 1.2e-04 / mag 5.3e+02 |
 | 2048×2 | 否 | dscale delta 4.9e-04 / mag 5.5e+03; dbase delta 3.7e-04 / mag 2.1e+03 |
-| 4096×1 | 否 | dscale delta 9.8e-04 / mag 7.0e+03; dbase delta 1.7e-04 / mag 1.7e+03 |
-| 512×4 | 否 | dscale delta 4.8e-07 / mag 4.4e+03; dbase delta 3.1e-04 / mag 1.6e+03 |
-| 1033×1 | 否 | dscale delta 1.2e-04 / mag 1.9e+03; dbase delta 1.2e-04 / mag 1.6e+03 |
+| 4096×1 | 否 | dscale delta 4.9e-04 / mag 7.0e+03; dbase delta 4.9e-04 / mag 1.7e+03 |
+| 512×4 | 否 | dscale delta 3.8e-06 / mag 4.4e+03; dbase delta 2.4e-04 / mag 1.6e+03 |
+| 1033×1 | 否 | dscale delta 1.2e-04 / mag 1.9e+03; dbase delta 2.4e-04 / mag 1.6e+03 |
 
 ## 结论
 
