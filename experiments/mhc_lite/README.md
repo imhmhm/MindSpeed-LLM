@@ -178,8 +178,9 @@ ac4 / ac5）。pre 级组件口径下 lite 已越过 fused 算子基线一个身
   0.356 ms、lite-ac4 e2e fwd+bwd 2.27，见方案 H 节））。~~剩余候选：E 前向
   与 G/H 链的合流（一个 pybind 调用吃掉 fwd+bwd 两侧的派发往返）、主线
   pipeline 冒烟、全 shape 精度矩阵~~（均已结：#27 见 H 节合流段、#28 见
-  冒烟节最终栈行、#29 见最终栈精度矩阵节）。campaign 收官；可选后续：算子
-  eps 参数透传、上游合入。
+  冒烟节最终栈行、#29 见最终栈精度矩阵节）。campaign 收官；~~算子 eps 参数
+  透传~~（已完成：fp32 [8]-lane 张量输入，`probe_eps_passthrough.py` 全 PASS、
+  计时无回归）；可选后续：上游合入。
 
 ## Tier 2：差距归因与消除（`MHC_LITE_TRITON=1`）
 
@@ -686,9 +687,10 @@ pre 级每调用稳定 −0.06~0.08 ms（×56 ≈ −4 ms/iter）；e2e 级差�
   sb%8≠0 尾组（grad 算子 padding 路径）与整 8 组合同地板；
 - **确定性**：非原子输出（全部前向、dx/dW/dgamma）逐位可复现；dscale/
   dbase 因跨核原子加在相对 ~1e-7 量级内重排；
-- 已知 API 边界如实记录：算子内部 eps 固定 1e-5（`lite_pre_ascendc` 的
-  eps 参数未透传，当前所有配置 norm_eps=1e-5 数值一致；换 eps 配置需先
-  补透传）。
+- eps 已作为 fp32 [8]-lane 张量输入透传进算子（每块一次 32B DataCopy + 标量
+  加法，计时无回归；`probe_eps_passthrough.py`：op 级 rstd 跟随自身 eps
+  公式至 1.7e-7、跨 eps 公式偏离 ≥2.3e-2，模块级 chain/split 双路透传，
+  放大 scale 的 mismatch 控制分离 40×）；norm_eps=1e-5 下数值与透传前一致。
 
 ### sinkhorn（full MHC res 头）各实现对比（`bench_sinkhorn.py`）
 
@@ -851,6 +853,8 @@ MHC_LITE_TRITON=1 bash wisemlops/jobs/webstudio_pretrain_ailab_slm_mhclite_0_5b.
 bash wisemlops/jobs/debug-webstudio_pretrain_ailab_slm_mhclite_finalstack.sh
 # 最终栈全 shape 精度矩阵 + 确定性检查（生成 report_finalstack_accuracy.md）
 python experiments/mhc_lite/probe_finalstack_accuracy.py
+# eps 透传验证（op 级 rstd 对拍 + 模块级 norm_eps 双路径 + mismatch 控制）
+python experiments/mhc_lite/probe_eps_passthrough.py
 # dscale 单 draw 超门的多 draw 归因探针（可换 --shapes / --draws）
 python experiments/mhc_lite/probe_finalstack_dscale.py --shapes 32768x1,8192x2
 ```

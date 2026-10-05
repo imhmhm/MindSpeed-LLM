@@ -51,6 +51,7 @@ wp = (w.to(torch.bfloat16) * gamma.to(torch.bfloat16).view(1, -1))
 
 scale = torch.tensor([0.011, 0.013, 0.017], device=DEV)
 base = (torch.randn(N32, device=DEV) * 0.5).contiguous()
+eps8 = torch.full((8,), EPS, device=DEV)
 
 
 def scale_vec(s0, s1, s2):
@@ -63,7 +64,7 @@ def scale_vec(s0, s1, s2):
 
 def run(sv, bv, tag):
     logits = torch.matmul(xf, wp.t())
-    y, hpre, hpost, coeff, rstd = ext.lite_pre_heads(xf, logits, sv, bv)
+    y, hpre, hpost, coeff, rstd = ext.lite_pre_heads(xf, logits, sv, bv, eps8)
     torch.npu.synchronize()
     print(f'--- {tag}')
     print('h_pre [0,:8] :', [f'{v:+.4f}' for v in hpre[0].tolist()])

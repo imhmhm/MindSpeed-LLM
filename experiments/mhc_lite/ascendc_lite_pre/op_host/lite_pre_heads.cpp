@@ -14,6 +14,8 @@
  *   scale  [32]          fp32   per logit lane: s0 x4 | s1 x4 | s2 x24
  *                             (a model constant the caller builds once)
  *   base   [32]          fp32   per logit lane
+ *   eps    [8]           fp32   RMSNorm epsilon broadcast to 8 lanes (the
+ *                             32B copy granularity); lane 0 is the value
  *   y      [sb, h]       bf16
  *   h_pre  [sb, 8]       fp32   lanes 0:4 valid
  *   h_post [sb, 8]       fp32   lanes 4:8 valid
@@ -108,6 +110,11 @@ public:
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
         this->Input("base")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND});
+        this->Input("eps")
             .ParamType(REQUIRED)
             .DataType({ge::DT_FLOAT})
             .Format({ge::FORMAT_ND})

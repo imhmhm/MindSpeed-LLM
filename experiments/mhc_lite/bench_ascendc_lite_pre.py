@@ -98,6 +98,7 @@ def main():
     scale32[0:E] = scale[0, 0]
     scale32[E:2 * E] = scale[0, 1]
     scale32[2 * E:] = scale[0, 2]
+    eps8 = torch.full((8,), EPS, device=DEV)
 
     # fp32 reference
     xf32 = xf.float()
@@ -118,7 +119,8 @@ def main():
 
     def chain_ac():
         logits_raw = torch.matmul(xf, wprime().t())
-        y, hpre8, hpost8, coeff, rstd = ext.lite_pre_heads(xf, logits_raw, scale32, base.view(N32))
+        y, hpre8, hpost8, coeff, rstd = ext.lite_pre_heads(
+            xf, logits_raw, scale32, base.view(N32), eps8)
         h_res = torch.matmul(coeff[:, 2 * E:N32], perm_flat)
         return y, hpre8[:, 0:4], hpost8[:, E:8], h_res
 
@@ -140,7 +142,7 @@ def main():
     logits_raw = torch.matmul(xf, wprime().t())
     t_wp = bench(wprime)
     t_gemm = bench(lambda: torch.matmul(xf, wp.t()))
-    t_op = bench(lambda: ext.lite_pre_heads(xf, logits_raw, scale32, base.view(N32)))
+    t_op = bench(lambda: ext.lite_pre_heads(xf, logits_raw, scale32, base.view(N32), eps8))
     t_cur = bench(chain_cur)
     t_ac = bench(chain_ac)
     print(f'\nW\' = W*gamma broadcast mul     : {t_wp:.3f} ms')
