@@ -8,6 +8,7 @@ from mindspeed_llm.tasks.checkpoint.convert_ckpt_mamba2 import MambaConverter
 from mindspeed_llm.tasks.checkpoint.convert_ckpt_longcat import LongCatConverter
 from mindspeed_llm.tasks.checkpoint.convert_ckpt_deepseek4 import DeepSeek4Converter
 from mindspeed_llm.tasks.checkpoint.convert_ckpt_ailab_slm_mhc import AILabSLMMHCConverter
+from mindspeed_llm.tasks.checkpoint.convert_ckpt_ailab_slm_mhclite import AILabSLMMHCLiteConverter
 from mindspeed_llm.training.utils import auto_coverage
 
 
@@ -55,6 +56,7 @@ def get_args():
             'glm5',
             'deepseek4_base',
             'ailab_slm_mhc',
+            'ailab_slm_mhclite',
         ],
         help='model type of huggingface',
     )
@@ -155,6 +157,8 @@ def main():
         converter = DeepSeek4Converter(args)
     elif args.model_type_hf == 'ailab_slm_mhc':
         converter = AILabSLMMHCConverter(args)
+    elif args.model_type_hf == 'ailab_slm_mhclite':
+        converter = AILabSLMMHCLiteConverter(args)
     elif args.load_model_type == 'hf' and args.save_model_type == 'mg':
         converter = Hf2MgConvert(args)
     elif args.load_model_type == 'mg' and args.save_model_type == 'hf':
