@@ -14,7 +14,8 @@ per-row scalars ride scalar registers via LocalTensor::GetValue + Muls,
 which tilelang cannot express (its axpy miscompiles on element scalars).
 
 The op is built outside any CANN installation: sync_and_build.sh drops
-the sources into a cann-ops clone and the resulting vendor tree in
+the sources into a gitcode ops-transformer clone (tag v9.1.1, matching
+the local CANN) and the resulting vendor tree in
 <clone>/build_out is picked up at runtime through
 ASCEND_CUSTOM_OPP_PATH, so libcust_opapi.so answers the aclnn symbols
 and no CANN file is touched.
