@@ -17,6 +17,30 @@ mhc_lite（V1 语义：带学习 gamma 的 RMSNorm + h_pre/h_post/h_res 三头�
 | `wisemlops/configs/ailab_slm_mhclite_0_5b_pretrain.yaml` | 训练配置（`entry:` 指向 lite 入口） |
 | `wisemlops/jobs/webstudio_pretrain_ailab_slm_mhclite_0_5b.sh` | 30-iter 冒烟 job |
 
+## 部署：算子依赖与产物复用（910B1–B4）
+
+Ascend C 三算子（`lite_pre_heads` / `lite_pre_fused` / `lite_pre_grad`）的依赖分
+构建期与运行期两层，两层完全解耦：
+
+| 层 | 需要什么 | 说明 |
+| --- | --- | --- |
+| 构建期（改 kernel 源码时） | gitcode `cann/ops-transformer` **tag v9.1.1** 浅 clone | 只用其构建系统（`build.sh --pkg --soc=ascend910b --ops=...`）；`sync_and_build.sh` 会把本仓 `experiments/mhc_lite/` 的算子源同步进 clone 再构建，无需手工拷贝。tag 须与本机 CANN 配套（v9.1.1 ↔ CANN 9.1.1） |
+| 运行期（训练/推理） | `build_out/` vendor 树（约 15 MB：`op_api/lib/libcust_opapi.so` + `op_impl` + `op_proto`） | 不需要任何 git clone。`mhc_lite_ac.py` 用 torch cpp_extension JIT 编译 `extension.cpp`（首次 ~1 min，之后走缓存）；aclnn 符号运行时从 vendor 树解析，`ASCEND_CUSTOM_OPP_PATH=<build_out 绝对路径>` 指过去即可 |
+
+产物可移植性：
+
+- 构建只有 `--soc=ascend910b` 一档，覆盖 910B1–B4（Atlas A2 训练系列同一
+  soc_version；本产物在 910B4 构建并验证），二进制跨子型号直接复用；
+- CANN 换大版本（如 9.2）后 vendor 树 ABI 不配套，需 checkout 对应 tag 重编；
+- sinkhorn 族（`aclnnMhcPost` / `aclnnMhcPreSinkhorn` 及全部 backward）在
+  CANN 9.1.1 自带 `libopapi.so` 中已内置（实测与自建 vendor 树同速同数值），
+  只有 `lite_pre_*` 三算子需要自建 vendor 树。
+
+给新环境（910B1–B4 + CANN 9.1.1）交付 mhc-lite 训练能力 = 本仓代码（算子源在
+`experiments/mhc_lite/`、接入在 `mindspeed_llm/`）+ `build_out/` 目录拷贝 +
+`export ASCEND_CUSTOM_OPP_PATH=<build_out>`。无需 gitcode clone，也无需在本仓
+内再造一份算子构建目录（构建系统更新频繁，内嵌会变成维护负担）。
+
 ## 算法（V1）
 
 - RMSNorm(x·e 展开) 带学习 gamma，`npu_rms_norm` 实现；
