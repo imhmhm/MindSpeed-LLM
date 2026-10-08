@@ -270,6 +270,12 @@
         "qkv_split": "per_group"
       }
     },
+    "ailab_slm_mhclite": {
+      "__base__": "base",
+      "config_set_value": {
+        "qkv_split": "per_group"
+      }
+    },
     "qwen25": {
       "__base__": "base",
       "config_set_value": {
