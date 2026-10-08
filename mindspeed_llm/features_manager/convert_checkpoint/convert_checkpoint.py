@@ -70,6 +70,8 @@ class CheckpointFeature(MindSpeedFeature):
                 'plm',
                 'longcat',
                 'glm5',
+                'ailab_slm_mhc',
+                'ailab_slm_mhclite',
             ],
             help='model type of huggingface',
         )

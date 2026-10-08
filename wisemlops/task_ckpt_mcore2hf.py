@@ -9,6 +9,7 @@ CONVERTERS = {
     "ailab_slm_0_5b____v2": ["--model-type-hf", "llama2",],
     "Qwen3-0.6B": ["--model-type-hf", "qwen3",],
     "ailab_slm_mhc": ["--model-type-hf", "ailab_slm_mhc",],
+    "ailab_slm_mhclite": ["--model-type-hf", "ailab_slm_mhclite",],
 }
 
 LOCAL_CKPT_ROOT = "/cache/inputs/ckpt"

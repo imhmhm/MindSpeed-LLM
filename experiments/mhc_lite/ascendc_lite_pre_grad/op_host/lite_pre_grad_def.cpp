@@ -25,61 +25,7 @@
  *   dscale  [3]        fp32   lane-count corrected (1/4, 1/4, 1/24)
  *   dbase   [32]       fp32   zero-initialized, atomically accumulated
  */
-
-#include "lite_pre_grad_tiling.h"
 #include "register/op_def_registry.h"
-#include "tiling/platform/platform_ascendc.h"
-
-namespace optiling {
-constexpr uint32_t ROWS_PER_BLOCK = 8;
-
-static ge::graphStatus TilingFunc(gert::TilingContext *context)
-{
-    auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
-    uint32_t aivNum = ascendcPlatform.GetCoreNumAiv();
-    if (aivNum == 0) {
-        return ge::GRAPH_FAILED;
-    }
-
-    const uint64_t sb = context->GetInputShape(1)->GetStorageShape().GetDim(0);
-    const uint64_t eh = context->GetInputShape(1)->GetStorageShape().GetDim(1);
-    const uint64_t h = eh / 4;
-
-    uint64_t totalBlocks = (sb + ROWS_PER_BLOCK - 1) / ROWS_PER_BLOCK;
-    uint64_t blockDim = totalBlocks < aivNum ? totalBlocks : aivNum;
-
-    LitePreGradTilingData tiling;
-    tiling.set_sb(static_cast<uint32_t>(sb));
-    tiling.set_h(static_cast<uint32_t>(h));
-    tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
-    context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());
-    context->SetBlockDim(static_cast<uint32_t>(blockDim));
-    size_t *currentWorkspace = context->GetWorkspaceSizes(1);
-    currentWorkspace[0] = 0;
-    return ge::GRAPH_SUCCESS;
-}
-}  // namespace optiling
-
-namespace ge {
-static ge::graphStatus InferShape(gert::InferShapeContext *context)
-{
-    const gert::Shape *xShape = context->GetInputShape(1);
-    *context->GetOutputShape(0) = *context->GetInputShape(5);  // [sb, 32]
-    *context->GetOutputShape(1) = *xShape;                     // [sb, 4h]
-    *context->GetOutputShape(2) = gert::Shape({3});
-    *context->GetOutputShape(3) = gert::Shape({32});
-    return ge::GRAPH_SUCCESS;
-}
-
-static graphStatus InferDataType(gert::InferDataTypeContext *context)
-{
-    context->SetOutputDataType(0, ge::DT_BF16);
-    context->SetOutputDataType(1, ge::DT_BF16);
-    context->SetOutputDataType(2, ge::DT_FLOAT);
-    context->SetOutputDataType(3, ge::DT_FLOAT);
-    return ge::GRAPH_SUCCESS;
-}
-}  // namespace ge
 
 namespace ops {
 class LitePreGrad : public OpDef {
@@ -157,10 +103,7 @@ public:
             .Format({ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND});
 
-        this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
-        this->AICore()
-            .SetTiling(optiling::TilingFunc)
-            .AddConfig("ascend910b");
+        this->AICore().AddConfig("ascend910b");
     }
 };
 OP_ADD(LitePreGrad);
