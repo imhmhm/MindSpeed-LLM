@@ -28,13 +28,11 @@
  *   rstd   [sb, 1]    fp32
  *   logits [sb, 32]   bf16   l before scale/base, saved for backward
  */
-
 #include "lite_pre_fused_tiling.h"
-#include "register/op_def_registry.h"
+#include "register/op_impl_registry.h"
 #include "tiling/platform/platform_ascendc.h"
 #include "tiling/tiling_api.h"
 using namespace matmul_tiling;
-
 namespace optiling {
 static ge::graphStatus TilingFunc(gert::TilingContext *context)
 {
@@ -108,99 +106,4 @@ static ge::graphStatus TilingFunc(gert::TilingContext *context)
 }
 }  // namespace optiling
 
-namespace ge {
-static ge::graphStatus InferShape(gert::InferShapeContext *context)
-{
-    const gert::Shape *xShape = context->GetInputShape(0);
-    const int64_t h = xShape->GetDim(1) / 4;
-    *context->GetOutputShape(0) = *xShape;
-    context->GetOutputShape(0)->SetDim(1, h);
-    *context->GetOutputShape(1) = *xShape;
-    context->GetOutputShape(1)->SetDim(1, 8);
-    *context->GetOutputShape(2) = *xShape;
-    context->GetOutputShape(2)->SetDim(1, 8);
-    *context->GetOutputShape(3) = *xShape;
-    context->GetOutputShape(3)->SetDim(1, 32);
-    *context->GetOutputShape(4) = *xShape;
-    context->GetOutputShape(4)->SetDim(1, 1);
-    *context->GetOutputShape(5) = *xShape;
-    context->GetOutputShape(5)->SetDim(1, 32);
-    return ge::GRAPH_SUCCESS;
-}
-
-static graphStatus InferDataType(gert::InferDataTypeContext *context)
-{
-    context->SetOutputDataType(0, ge::DT_BF16);
-    context->SetOutputDataType(1, ge::DT_FLOAT);
-    context->SetOutputDataType(2, ge::DT_FLOAT);
-    context->SetOutputDataType(3, ge::DT_FLOAT);
-    context->SetOutputDataType(4, ge::DT_FLOAT);
-    context->SetOutputDataType(5, ge::DT_BF16);
-    return ge::GRAPH_SUCCESS;
-}
-}  // namespace ge
-
-namespace ops {
-class LitePreFused : public OpDef {
-public:
-    explicit LitePreFused(const char *name) : OpDef(name)
-    {
-        this->Input("x")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_BF16})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("w")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_BF16})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("scale")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Input("base")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Output("y")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_BF16})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Output("h_pre")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Output("h_post")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Output("coeff")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Output("rstd")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
-        this->Output("logits")
-            .ParamType(REQUIRED)
-            .DataType({ge::DT_BF16})
-            .Format({ge::FORMAT_ND})
-            .UnknownShapeFormat({ge::FORMAT_ND});
-
-    this->SetInferShape(ge::InferShape).SetInferDataType(ge::InferDataType);
-    this->AICore()
-        .SetTiling(optiling::TilingFunc)
-        .AddConfig("ascend910b");
-}
-};
-OP_ADD(LitePreFused);
-}  // namespace ops
+IMPL_OP_OPTILING(LitePreFused).Tiling(optiling::TilingFunc);

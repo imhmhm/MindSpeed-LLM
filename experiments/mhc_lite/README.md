@@ -414,8 +414,9 @@ CANN ops（AIV cast→AIC GEMM→vector 三段流水），tilelang 层无法达�
 ### 手写 Ascend C 独立算子 LitePreHeads（`ascendc_lite_pre/`，方案 E）
 
 方案 C 结论的落地：按 vllm-ascend 自定义算子模板手写、但**不进 CANN
-安装、不进 cann-ops 仓**——`sync_and_build.sh` 把源码投递到一份 cann-ops
-clone 里借其构建系统出 `.run` 包，解出的 vendor 树放在
+安装、不进上游分支**——`sync_and_build.sh` 把源码投递到一份 gitcode
+ops-transformer clone（tag v9.1.1，须与本机 CANN 版本配套）里借其构建
+系统出 `.run` 包，解出的 vendor 树放在
 `<clone>/build_out`，运行期只靠 `export ASCEND_CUSTOM_OPP_PATH=<clone>/build_out`
 生效：`GetCustOpApiHandlers` 会先于 libopapi.so 在该路径 dlopen
 `libcust_opapi.so`，aclnn 符号即被接住。全程无需 root、不碰任何 CANN 文件。
