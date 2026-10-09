@@ -36,6 +36,8 @@ def set_wandb_writer_wrapper(fn):
             log_dir = os.path.join(args.save, 'swanlab') if args.save else 'swanlog'
 
         import swanlab
+        ## zhh: 关闭硬件监控: 其 npu-smi 周期采集在 finish 时被无超时 join, npu-smi 一卡进程就收不了尾
+        swanlab.merge_settings(swanlab.Settings(probe=swanlab.Settings.Probe(monitor=False)))
         global_vars._GLOBAL_WANDB_WRITER = swanlab.init(
             project=args.swanlab_project,
             name=args.swanlab_exp_name or None,
