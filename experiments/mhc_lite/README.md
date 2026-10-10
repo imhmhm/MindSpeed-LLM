@@ -41,6 +41,23 @@ Ascend C 三算子（`lite_pre_heads` / `lite_pre_fused` / `lite_pre_grad`）的
 `export ASCEND_CUSTOM_OPP_PATH=<build_out>`。无需 gitcode clone，也无需在本仓
 内再造一份算子构建目录（构建系统更新频繁，内嵌会变成维护负担）。
 
+### 最终栈开关对照（全开 = lite-ac5）
+
+快速路径全部由 `MHC_LITE_*` 环境开关门控，默认全关 = Tier-0 torch 路径：
+
+| 开关 | 方案（见"优化 campaign 基线与方案矩阵"） | 作用 |
+| --- | --- | --- |
+| `MHC_LITE_ASCENDC=1` | E | hc_pre 前向走 Ascend C `LitePreHeads` 算子（单 AIV kernel：rms 平方和+三头+y+rstd） |
+| `MHC_LITE_ASCENDC_CHAIN=1` | G/I | 前向整链（W'+GEMM+算子+h_res）一次 pybind 调用，launch 融合 |
+| `MHC_LITE_ASCENDC_GRAD=1` | H | 反向整链走 Ascend C `LitePreGrad` 算子（GEMM vjp 留 autograd） |
+| `MHC_LITE_NATIVE_POST_BWD=1` | A | hc_post 反向走原生 `aclnnMhcPostBackward` |
+| `MHC_LITE_POST_DIRECT=1` | D | hc_post 前向直连算子 + 输出视图，免 wrapper 的输出 clone（B>1 输出为非连续视图，采用前先过 pipeline 冒烟） |
+| `MHC_LITE_TRITON=1` | Tier-1（B 之前的 triton 融合 kernel） | 不含 Ascend C 算子的 triton 快速路径，vendor 树缺失时可用 |
+
+30-iter 冒烟 job：`wisemlops/jobs/webstudio_pretrain_ailab_slm_mhclite_0_5b.sh`
+（Tier-0/1）；最终栈全套 env 的版本 `debug-webstudio_pretrain_ailab_slm_mhclite_finalstack.sh`
+在实验分支 `zhanghengheng/dev_26.1.0_mhc`。
+
 ## 算法（V1）
 
 - RMSNorm(x·e 展开) 带学习 gamma，`npu_rms_norm` 实现；
