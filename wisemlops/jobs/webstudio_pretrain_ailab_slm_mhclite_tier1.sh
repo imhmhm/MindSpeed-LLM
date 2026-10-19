@@ -8,23 +8,13 @@ MTP_CODE_DIR=/home/ma-user/work/dataset/huashan_zhh_guiyang_turbo/github/MindSpe
 cd $MTP_CODE_DIR
 export PYTHONPATH=$MTP_CODE_DIR:$PYTHONPATH
 
-# final mhc_lite stack: scheme E (Ascend C LitePreHeads) + G/H merge
-# (one-call forward chain + one-call backward chain) + A (native aclnn post
-# backward) + D (direct post call).  The custom-op vendor tree must be
-# visible before torch_npu imports.
-export ASCEND_CUSTOM_OPP_PATH=/home/ma-user/work/dataset/huashan_zhh_guiyang_turbo/github/cann-ops/build_out
-export MHC_LITE_ASCENDC=1
-export MHC_LITE_ASCENDC_GRAD=1
-export MHC_LITE_ASCENDC_CHAIN=1
-export MHC_LITE_NATIVE_POST_BWD=1
-export MHC_LITE_POST_DIRECT=1
-
 export HCCL_HOST_SOCKET_PORT_RANGE=60000-60050
 export HCCL_NPU_SOCKET_PORT_RANGE=61000-61050
 
 export USE_OBS=0
 MTP_DATASET_HOME=/home/ma-user/work/dataset/huashan_zhh_guiyang_pfs
 export MIND_SPEED_LOG_LEVEL=ERROR
+export MHC_LITE_TRITON=1
 
 ## ====== launch ====== ##
 python wisemlops/launch.py \
