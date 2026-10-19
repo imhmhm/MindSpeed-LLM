@@ -12,7 +12,7 @@ export PYTHONPATH=$MTP_CODE_DIR:$PYTHONPATH
 # (one-call forward chain + one-call backward chain) + A (native aclnn post
 # backward) + D (direct post call).  The custom-op vendor tree must be
 # visible before torch_npu imports.
-export ASCEND_CUSTOM_OPP_PATH=/cache/ops-transformer/build_out
+export ASCEND_CUSTOM_OPP_PATH=/home/ma-user/work/dataset/huashan_zhh_guiyang_turbo/github/ops-transformer/build_out
 export MHC_LITE_ASCENDC=1
 export MHC_LITE_ASCENDC_GRAD=1
 export MHC_LITE_ASCENDC_CHAIN=1
