@@ -2,7 +2,7 @@
 
 mhc_lite：用"24 个置换矩阵的 softmax 凸组合"精确构造双随机混合矩阵（零迭代，
 不经 CANN sinkhorn 算子），模块/封装/算子源码全部在本仓库。设计与验证细节见
-本目录 `README.md`（研究记录）。
+本目录 `README.md`（研究记录）与根目录 `MHC_LITE_EXPERIMENT_REPORT.md`。
 
 ## 三档运行（依赖从零到全）
 
@@ -42,11 +42,13 @@ export MHC_LITE_NATIVE_POST_BWD=1 MHC_LITE_POST_DIRECT=1
   （最终栈 30 步冒烟，环境变量已配好）；
 - 检查点转 HF：`ailab_slm_mhclite` 已注册到 `task_ckpt_mcore2hf.py`。
 
-## 自检脚本
+## 自检（单卡，脚本自带环境注入）
 
-正确性/精度/压测脚本（`parity_test.py`、`probe_finalstack_accuracy.py`、
-`probe_finalstack_stress.py`）不在本分支，见研究分支
-`zhanghengheng/dev_26.1.0_mhc` 的 `experiments/mhc_lite/`。
+```bash
+python experiments/mhc_lite/parity_test.py            # 纯 torch 档正确性
+python experiments/mhc_lite/probe_finalstack_accuracy.py  # 最终栈全形状精度
+python experiments/mhc_lite/probe_finalstack_stress.py    # 饱和/退化值域压测
+```
 
 ## 两个已知怪癖
 

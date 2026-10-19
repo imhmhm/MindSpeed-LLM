@@ -1,6 +1,6 @@
 # 最终栈全 shape 精度矩阵（E+G+H+A+D，lite-ac5）
 
-- 生成：`probe_finalstack_accuracy.py`，commit `b965ea36`，单卡 910B4，bf16 训练口径（h=1024，E=4，24 置换）。
+- 生成：`probe_finalstack_accuracy.py`，commit `eabb868f`，单卡 910B4，bf16 训练口径（h=1024，E=4，24 置换）。
 - 被测对象：`MHCLite.hc_pre + hc_post` 完整模块链，env 为最终栈全套（`MHC_LITE_ASCENDC/GRAD/CHAIN + NATIVE_POST_BWD + POST_DIRECT`），即 30-iter 冒烟所用的确切路径。
 - 参考一（tier2）：fp32 torch 参考 + 自带 autograd，按 8192 行分块计算（链上所有 stage 均按行独立，分块对前向与 dx 精确；参数梯度跨块 fp32 累加，仅求和顺序与整图 autograd 不同，影响在 fp32 求和噪声 ~1e-7 级）。
 - 参考二（tier1）：同一 bf16 输入上的 Tier-0 torch 孪生模块，同样分块。
@@ -96,10 +96,10 @@ LitePreGrad 的 dscale/dbase 以原子加归约（跨核浮点加法顺序不保
 
 | s×b | 逐位一致 | 不一致张量及重跑间偏差（对梯度幅值） |
 |---|---|---|
-| 512×1 | 否 | dscale delta 6.1e-05 / mag 6.2e+02; dbase delta 1.2e-04 / mag 5.3e+02 |
-| 2048×2 | 否 | dscale delta 4.9e-04 / mag 5.5e+03; dbase delta 3.7e-04 / mag 2.1e+03 |
-| 4096×1 | 否 | dscale delta 4.9e-04 / mag 7.0e+03; dbase delta 4.9e-04 / mag 1.7e+03 |
-| 512×4 | 否 | dscale delta 3.8e-06 / mag 4.4e+03; dbase delta 2.4e-04 / mag 1.6e+03 |
+| 512×1 | 否 | dscale delta 1.2e-04 / mag 6.2e+02; dbase delta 1.3e-04 / mag 5.3e+02 |
+| 2048×2 | 否 | dscale delta 4.9e-04 / mag 5.5e+03; dbase delta 1.3e-04 / mag 2.1e+03 |
+| 4096×1 | 否 | dscale delta 4.9e-04 / mag 7.0e+03; dbase delta 2.4e-04 / mag 1.7e+03 |
+| 512×4 | 否 | dscale delta 4.9e-04 / mag 4.4e+03; dbase delta 2.4e-04 / mag 1.6e+03 |
 | 1033×1 | 否 | dscale delta 1.2e-04 / mag 1.9e+03; dbase delta 2.4e-04 / mag 1.6e+03 |
 
 ## 结论

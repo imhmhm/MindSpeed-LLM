@@ -41,6 +41,23 @@ Ascend C 三算子（`lite_pre_heads` / `lite_pre_fused` / `lite_pre_grad`）的
 `export ASCEND_CUSTOM_OPP_PATH=<build_out>`。无需 gitcode clone，也无需在本仓
 内再造一份算子构建目录（构建系统更新频繁，内嵌会变成维护负担）。
 
+### 最终栈开关对照（全开 = lite-ac5）
+
+快速路径全部由 `MHC_LITE_*` 环境开关门控，默认全关 = Tier-0 torch 路径：
+
+| 开关 | 方案（见"优化 campaign 基线与方案矩阵"） | 作用 |
+| --- | --- | --- |
+| `MHC_LITE_ASCENDC=1` | E | hc_pre 前向走 Ascend C `LitePreHeads` 算子（单 AIV kernel：rms 平方和+三头+y+rstd） |
+| `MHC_LITE_ASCENDC_CHAIN=1` | G/I | 前向整链（W'+GEMM+算子+h_res）一次 pybind 调用，launch 融合 |
+| `MHC_LITE_ASCENDC_GRAD=1` | H | 反向整链走 Ascend C `LitePreGrad` 算子（GEMM vjp 留 autograd） |
+| `MHC_LITE_NATIVE_POST_BWD=1` | A | hc_post 反向走原生 `aclnnMhcPostBackward` |
+| `MHC_LITE_POST_DIRECT=1` | D | hc_post 前向直连算子 + 输出视图，免 wrapper 的输出 clone（B>1 输出为非连续视图，采用前先过 pipeline 冒烟） |
+| `MHC_LITE_TRITON=1` | Tier-1（B 之前的 triton 融合 kernel） | 不含 Ascend C 算子的 triton 快速路径，vendor 树缺失时可用 |
+
+30-iter 冒烟 job：`wisemlops/jobs/webstudio_pretrain_ailab_slm_mhclite_0_5b.sh`
+（Tier-0/1）；最终栈全套 env 的版本 `webstudio_pretrain_ailab_slm_mhclite_finalstack.sh`
+在实验分支 `zhanghengheng/dev_26.1.0_mhc`。
+
 ## 算法（V1）
 
 - RMSNorm(x·e 展开) 带学习 gamma，`npu_rms_norm` 实现；
@@ -119,7 +136,7 @@ dpost 6.0e-07 / dcomb 0。
 | Tier-2 + 原生 post 反向 | ~3583 | 42.8–44.3 | 5.856 | 0.313 |
 | **最终栈（E+G+H+A+D）** | **~3350** | 46.7–47.2 | 5.857 | 0.313 |
 
-最终栈 30-iter（`debug-webstudio_pretrain_ailab_slm_mhclite_finalstack.sh`，
+最终栈 30-iter（`webstudio_pretrain_ailab_slm_mhclite_finalstack.sh`，
 2026-10-01）：loss 19.36→5.8566 单调下降、无 NaN/跳过迭代，iter30 loss
 5.8566/grad norm 0.313 与全部基线一致（Tier-2 5.856/0.313、full MHC
 5.859/0.311）；稳态中位数 ~3330 ms/iter（iter21 一次 4.5 s 离群，均值
@@ -717,6 +734,39 @@ pre 级每调用稳定 −0.06~0.08 ms（×56 ≈ −4 ms/iter）；e2e 级差�
   公式至 1.7e-7、跨 eps 公式偏离 ≥2.3e-2，模块级 chain/split 双路透传，
   放大 scale 的 mismatch 控制分离 40×）；norm_eps=1e-5 下数值与透传前一致。
 
+### 最终栈饱和/退化值域压测（`probe_finalstack_stress.py`）
+
+完整报告：`report_finalstack_stress.md`（本目录，脚本自动生成；报告开头有
+"名词与写法"一节，先读它）。动机：全 shape 精度矩阵只覆盖常规输入，而
+`aclnnMhcPreSinkhornBackward` 的教训是静默梯度缺陷藏在大数值（softmax 饱和）、
+退化输入区域（见 `../mhc_debug/README.md`）。对最终栈做对抗性参数放大阶梯：
+7 组工况（常规对照 / s2W3=部分饱和 / s10=深饱和 / b10、b60=偏置压成 one-hot /
+x0=归一化系数贴 eps 截断边界 / x10=大输入）× 6 种形状（含尾组 1033 与 b=4），
+真值用 CPU fp64 重算，超标组合自动换随机种子重测 2 次（重抽后仍超标才算
+缺陷），另附饱和度放大扫描（scale 0.25×~32×、每档 6 个种子取中位数，三方
+对比"最终栈 / 纯 PyTorch 基准(同 bf16 输入) / 基准(bf16 数值转 fp32)"，用于
+区分"算子算错"与"输入精度不够"）、不合并调用链与 triton 反向两条对照实现、
+同输入重复 200 次压测、跨工况轮换 6 轮。结论：
+
+- **42 组合 38 合格，未发现 CANN 级缺陷（前向、反向都干净）**。常规域 /
+  深饱和 / eps 边界 / 大输入全部在 bf16 固有误差水平（1e-3~1e-2）；深饱和
+  b10/b60 下 h_res 与 y 本质精确（误差 0~1e-36，最终栈与基准都与真值同
+  one-hot）——与 CANN sinkhorn 反向"越饱和越错"恰好相反：置换凸组合头没有
+  相减抵消链；
+- 4 个超标组合**全部且仅**出现在部分饱和工况（s2W3/s10，每行主元近乎随机、
+  logit 幅值 25~50），且均属边缘超标：最终栈与基准实现各自对真值都在
+  2e-2~5e-2、互差 ≤2.5 倍（2% 门槛按常规域标定，在部分饱和工况下比 bf16
+  固有误差本身还低）。放大扫描的三方对比定案：两个 bf16 路每一档都贴合
+  （中位数之比 h_res 最大 1.08×、其余 ≤1.45×），fp32 路全程钉在真值级
+  1e-6~1e-4 → 误差抬升来自 bf16 输入/参数舍入被饱和 softmax 放大（近平局
+  主元随机翻转），与算子内部计算无关（CANN 的定罪特征正相反：算子独高
+  10~74 倍而 fp32 实现保持 1e-4）；
+- 确定性：同输入重复 200 次无 NaN/Inf、原子累加以外的张量逐位一致、原子
+  累加的 dscale/dbase 相对重排 ≤3.7e-8；跨工况轮换无状态残留；不合并调用
+  链 / triton 反向与最终栈同一误差水平；
+- 若训练真把 scale 推进部分饱和带，缓解项 = res 头 logits GEMM 转 fp32
+  （上文 C1/C2 方案，~+3 ms/iter）。
+
 ### sinkhorn（full MHC res 头）各实现对比（`bench_sinkhorn.py`）
 
 同口径对比：logits [4096,16] fp32 → softmax(s·l+b)+eps → 初始列归一 →
@@ -875,11 +925,15 @@ python experiments/mhc_lite/post_backward_seed_sweep.py
 bash wisemlops/jobs/webstudio_pretrain_ailab_slm_mhclite_0_5b.sh
 MHC_LITE_TRITON=1 bash wisemlops/jobs/webstudio_pretrain_ailab_slm_mhclite_0_5b.sh
 # 最终栈 30-iter 冒烟（E+G+H+A+D）
-bash wisemlops/jobs/debug-webstudio_pretrain_ailab_slm_mhclite_finalstack.sh
+bash wisemlops/jobs/webstudio_pretrain_ailab_slm_mhclite_finalstack.sh
 # 最终栈全 shape 精度矩阵 + 确定性检查（生成 report_finalstack_accuracy.md）
 python experiments/mhc_lite/probe_finalstack_accuracy.py
 # eps 透传验证（op 级 rstd 对拍 + 模块级 norm_eps 双路径 + mismatch 控制）
 python experiments/mhc_lite/probe_eps_passthrough.py
 # dscale 单 draw 超门的多 draw 归因探针（可换 --shapes / --draws）
 python experiments/mhc_lite/probe_finalstack_dscale.py --shapes 32768x1,8192x2
+
+# 最终栈饱和/退化值域压测：7 工况 × 6 形状矩阵 + 放大倍数扫描 + 重复压测
+# （生成 report_finalstack_stress.md；--quick 快速冒烟，--soak N 调次数，约 65 s）
+python experiments/mhc_lite/probe_finalstack_stress.py
 ```
