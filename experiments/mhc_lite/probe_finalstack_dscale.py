@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 os.environ.setdefault(
     'ASCEND_CUSTOM_OPP_PATH',
-    str(Path.home() / 'work/dataset/huashan_zhh_guiyang_turbo/github/cann-ops/build_out'))
+    '/cache/ops-transformer/build_out')
 
 import torch  # noqa: E402
 import torch_npu  # noqa: E402

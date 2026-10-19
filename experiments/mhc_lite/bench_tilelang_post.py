@@ -1,7 +1,7 @@
 # Copyright (c) 2026, HUAWEI CORPORATION.  All rights reserved.
 """Measure the tilelang-ascend mhc_post example at mhc_lite shapes.
 
-Runs examples/mhc_post/example_mhc_post.py from the reference clone (V10 pure
+Runs examples/mhc_post/example_mhc_post.py from the tilelang-ascend clone (V10 pure
 Vector kernel) against the eager bmm baseline and the aclnn fused op at the
 same shapes/dtypes, so the three post-side implementations are directly
 comparable. Note the tilelang repo's own "vs CANN" numbers use the eager
@@ -18,7 +18,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, "/home/ma-user/work/dataset/huashan_zhh_guiyang_turbo/"
-                   "github/_ref_mhc/tilelang-ascend/examples/mhc_post")
+                   "github/tilelang-ascend/examples/mhc_post")
 
 import torch  # noqa: E402
 import torch_npu  # noqa: E402

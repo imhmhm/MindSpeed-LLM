@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 os.environ.setdefault(
     'ASCEND_CUSTOM_OPP_PATH',
-    str(Path.home() / 'work/dataset/huashan_zhh_guiyang_turbo/github/cann-ops/build_out'))
+    '/cache/ops-transformer/build_out')
 
 # final-stack env: exercise the chain (G/H) path; the plain path flips the
 # env var off per call below

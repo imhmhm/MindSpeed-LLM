@@ -3,7 +3,7 @@
 # Sync the LitePreHeads op into a gitcode ops-transformer clone and build the
 # standalone custom-op package (no CANN installation is touched).
 #
-# Usage: bash sync_and_build.sh [ops-transformer clone dir]
+# Usage: bash sync_and_build.sh [ops-transformer clone dir, default /cache/ops-transformer]
 # Env:   ASCEND_HOME_PATH (default /usr/local/Ascend/cann-9.1.1)
 #
 # The clone must sit on tag v9.1.1 (matches a CANN 9.1.1 install); master
@@ -19,7 +19,7 @@
 set -e
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-CLONE=${1:-$HOME/work/dataset/huashan_zhh_guiyang_turbo/github/ops-transformer}
+CLONE=${1:-/cache/ops-transformer}
 
 if [ ! -d "$CLONE/mhc" ]; then
     echo "ops-transformer clone not found at $CLONE (git clone --branch v9.1.1 https://gitcode.com/cann/ops-transformer.git)" >&2

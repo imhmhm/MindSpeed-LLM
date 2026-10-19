@@ -7,7 +7,7 @@
 # clone, so it joins the --ops list: one build_out then serves both the
 # mhc-lite and mhc-sinkhorn inference paths.
 #
-# Usage: bash sync_and_build.sh [ops-transformer clone dir]
+# Usage: bash sync_and_build.sh [ops-transformer clone dir, default /cache/ops-transformer]
 #
 # The clone must sit on tag v9.1.1 (matches a CANN 9.1.1 install); master
 # tracks newer CANN releases and may fail to build:
@@ -24,7 +24,7 @@ set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 HEADS_DIR=$(cd "$HERE/../ascendc_lite_pre" && pwd)
 FUSED_DIR=$(cd "$HERE/../ascendc_lite_pre_fused" && pwd)
-CLONE=${1:-$HOME/work/dataset/huashan_zhh_guiyang_turbo/github/ops-transformer}
+CLONE=${1:-/cache/ops-transformer}
 
 if [ ! -d "$CLONE/mhc" ]; then
     echo "ops-transformer clone not found at $CLONE (git clone --branch v9.1.1 https://gitcode.com/cann/ops-transformer.git)" >&2

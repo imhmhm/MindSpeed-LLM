@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 os.environ.setdefault(
     'ASCEND_CUSTOM_OPP_PATH',
-    str(Path.home() / 'work/dataset/huashan_zhh_guiyang_turbo/github/cann-ops/build_out'))
+    '/cache/ops-transformer/build_out')
 
 # the final stack: E (Ascend C LitePreHeads) + G/H merge (one-call forward and
 # backward chains) + A (native aclnn post backward) + D (direct post call).
