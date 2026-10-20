@@ -42,13 +42,13 @@ cd "$CLONE"
 PIP_NO_BUILD_ISOLATION=1 bash build.sh --pkg --soc=ascend910b \
     --ops=lite_pre_heads,lite_pre_fused,lite_pre_grad,mhc_pre,mhc_pre_sinkhorn,mhc_sinkhorn,mhc_post
 
-# ASCEND_CUSTOM_OPP_PATH entries must directly contain op_api/lib/, so
-# unpack the vendor tree the CPack staging area holds into build_out
-# (build.sh itself only leaves the .run self-extractor there)
-STAGING="$CLONE"/build/_CPack_Packages/Linux/External/*.run/packages/vendors/custom_transformer
+# ASCEND_CUSTOM_OPP_PATH entries must directly contain op_api/lib/, so unpack
+# the staged vendor tree the CPack external generator leaves under build/
+# into build_out (build.sh itself only puts the .run self-extractor there).
+# The *.run glob must stay unquoted so the shell expands it.
 rm -rf "$CLONE/build_out"
 mkdir -p "$CLONE/build_out"
-cp -r "$STAGING"/. "$CLONE/build_out/"
+cp -r "$CLONE"/build/_CPack_Packages/Linux/External/*.run/packages/vendors/custom_transformer/. "$CLONE/build_out/"
 
 echo
 echo "package root: $CLONE/build_out"
