@@ -69,6 +69,7 @@ class Mg2HfConvert(Convert):
 
         if self.hf_cfg_dir is not None:
             self.copy_hf_cfg()
+        self.update_hf_cfg_rope_theta()
 
         self.tensor_model_parallel_size = self.load_model.tensor_model_parallel_size
         self.pipeline_model_parallel_size = self.load_model.pipeline_model_parallel_size
@@ -243,6 +244,38 @@ class Mg2HfConvert(Convert):
                 if os.path.isfile(src_path):
                     if self.copy_hf_cfg_file(src_path, dst_path):
                         logger.info(f"Copied: {filename} from {src_path} to {dst_path}")
+
+    def update_hf_cfg_rope_theta(self) -> None:
+        """Sync rope_theta in the exported HF config with rotary_base from the Megatron checkpoint.
+
+        Training runs may override rotary_base while the reference HF directory keeps the
+        original value, so the config copied from hf_cfg_dir can mis-describe the weights.
+        """
+        rotary_base = getattr(self.load_model, 'rotary_base', None)
+        if rotary_base is None:
+            return
+
+        config_path = os.path.join(self.save_dir, 'config.json')
+        if not os.path.isfile(config_path):
+            return
+
+        with open(config_path, 'r', encoding='utf-8') as f:
+            hf_config = json.load(f)
+
+        if 'rope_theta' not in hf_config:
+            if rotary_base != 10000:
+                logger.warning(
+                    f"mg ckpt rotary_base={rotary_base} but {config_path} has no rope_theta field to sync"
+                )
+            return
+
+        if hf_config['rope_theta'] != rotary_base:
+            old_theta = hf_config['rope_theta']
+            hf_config['rope_theta'] = rotary_base
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(hf_config, f, indent=2, ensure_ascii=False)
+                f.write('\n')
+            logger.info(f"Updated rope_theta in {config_path}: {old_theta} -> {rotary_base} (from mg ckpt rotary_base)")
 
     def calc_pprank_layeridxs(self) -> None:
         """pp->hf layers, {pp1: [0,1,2,3]}"""
